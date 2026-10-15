@@ -1,14 +1,4 @@
--- Bloomware UI 1.3.0, based on Fluent 1.1.0 by dawid (MIT).
--- Generated from src/ by tools/build.py. Original virtual module loader retained.
---[[
-    Fluent Interface Suite
-    Edit src/ and rebuild this file with tools/build.py.
-    To view the source code, see the 'src' folder on GitHub!
-
-    Author: dawid
-    License: MIT
-    GitHub: https://github.com/dawid-scripts/Fluent
---]]
+-- Bloomware UI 1.4.0, based on Fluent 1.1.0 by dawid (MIT).
 local moduleTree, getModuleContext = {
 	{1, "ModuleScript", {"MainModule"}, {
 		{2, "ModuleScript", {"Acrylic"}, {
@@ -72,14 +62,15 @@ local moduleTree, getModuleContext = {
 			{53, "ModuleScript", {"Rose"}}
 		}},
 		{56, "ModuleScript", {"Profiles"}},
-		{57, "ModuleScript", {"SearchIndex"}}
+		{57, "ModuleScript", {"SearchIndex"}},
+		{58, "ModuleScript", {"Appearance"}}
 	}}
 }
 local moduleFactories = {
 	-- Module: MainModule
 	[1] = function()
 		local __context, script, require = getModuleContext(1)
-		-- Bloomware UI 1.3, based on Fluent 1.1.0 by dawid (MIT).
+		-- Bloomware UI 1.4, based on Fluent 1.1.0 by dawid (MIT).
 		local RunService = game:GetService("RunService")
 		local LocalPlayer = game:GetService("Players").LocalPlayer
 		local Creator = require(script.Creator)
@@ -98,7 +89,7 @@ local moduleFactories = {
 		Notification:Init(ScreenGui)
 
 		local Fluent = {
-		    Version = "1.3.0-bloom", OpenFrames = {}, Options = {},
+		    Version = "1.4.0-bloom", OpenFrames = {}, Options = {},
 		    Themes = require(script.Themes).Names,
 		    Window = nil, WindowFrame = nil, Unloaded = false, Theme = "Dark",
 		    DialogOpen = false, UseAcrylic = false, Acrylic = false, Transparency = true,
@@ -187,7 +178,40 @@ local moduleFactories = {
 		    self.WindowFrame = window.Root
 		    self:SetTheme(config.Theme or "Dark")
 		    self:ToggleTransparency(config.Transparency ~= false)
+		    self.Appearance = require(script.Appearance).new(self, config)
+		    if config.Appearance ~= false then self.Appearance:BindWindow(window) end
 		    return window
+		end
+
+		function Fluent:SetBackgroundImage(source)
+		    if not self.Appearance then return false, "Сначала создай окно интерфейса." end
+		    return self.Appearance:Apply(source)
+		end
+
+		function Fluent:ClearBackgroundImage()
+		    if not self.Appearance then return false end
+		    return self.Appearance:Clear()
+		end
+
+		function Fluent:SetBackgroundTransparency(value)
+		    if not self.Appearance then return false end
+		    local ok = self.Appearance:SetTransparency(value)
+		    self.Appearance:_Sync(false)
+		    return ok
+		end
+
+		function Fluent:SetBackgroundDarkness(value)
+		    if not self.Appearance then return false end
+		    local ok = self.Appearance:SetDarkness(value)
+		    self.Appearance:_Sync(false)
+		    return ok
+		end
+
+		function Fluent:SetBackgroundScaleType(value)
+		    if not self.Appearance then return false end
+		    local ok = self.Appearance:SetScaleType(value)
+		    self.Appearance:_Sync(false)
+		    return ok
 		end
 
 		function Fluent:SetTheme(name)
@@ -208,6 +232,7 @@ local moduleFactories = {
 		    if self.Unloaded then return end
 		    self:ClosePopups()
 		    self.Unloaded = true
+		    if self.Appearance then self.Appearance:Destroy() end
 		    if self.Window then self.Window:Destroy() end
 		    Acrylic.Destroy()
 		    Creator.Disconnect()
@@ -218,6 +243,7 @@ local moduleFactories = {
 		    if self.Profiles then self.Profiles:Destroy() end
 		    self.Window = nil
 		    self.WindowFrame = nil
+		    self.Appearance = nil
 		    if getgenv and getgenv().Fluent == self then getgenv().Fluent = nil end
 		end
 
@@ -387,6 +413,15 @@ local moduleFactories = {
 		        Name = "Background", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 0.06,
 		        ThemeTag = { BackgroundColor3 = "AcrylicMain" },
 		    }, { New("UICorner", { CornerRadius = UDim.new(0, 14) }) })
+		    paint.BackgroundImage = New("ImageLabel", {
+		        Name = "CustomBackground", Size = UDim2.fromScale(1, 1), Visible = false,
+		        BackgroundTransparency = 1, Image = "", ImageTransparency = 0.25,
+		        ScaleType = Enum.ScaleType.Crop, Active = false,
+		    }, { New("UICorner", { CornerRadius = UDim.new(0, 14) }) })
+		    paint.BackgroundOverlay = New("Frame", {
+		        Name = "BackgroundDim", Size = UDim2.fromScale(1, 1), Visible = false,
+		        BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.65, Active = false,
+		    }, { New("UICorner", { CornerRadius = UDim.new(0, 14) }) })
 		    paint.Frame = New("Frame", {
 		        Name = "WindowSurface", Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
 		    }, {
@@ -395,7 +430,7 @@ local moduleFactories = {
 		            SliceCenter = Rect.new(Vector2.new(99, 99), Vector2.new(99, 99)),
 		            Size = UDim2.new(1, 70, 1, 70), Position = UDim2.fromOffset(-35, -28),
 		            ImageColor3 = Color3.fromRGB(0, 0, 0), ImageTransparency = 0.48,
-		        }), background,
+		        }), background, paint.BackgroundImage, paint.BackgroundOverlay,
 		        New("Frame", {
 		            Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.fromRGB(255, 255, 255), BackgroundTransparency = 0.94,
 		        }, {
@@ -503,6 +538,71 @@ local moduleFactories = {
 		    end)
 		    if ok and type(uri) == "string" and uri ~= "" then cached[source] = uri; return uri end
 		    return nil
+		end
+
+		local imageCache = {}
+		local imageCacheOrder = {}
+		local maxImageBytes = 12 * 1024 * 1024
+
+		function Assets.NormalizeImageSource(source)
+		    if type(source) == "number" and source > 0 and source % 1 == 0 and source < math.huge then
+		        source = string.format("%.0f", source)
+		    end
+		    if type(source) ~= "string" then return nil, "Укажи прямую ссылку на PNG/JPG или Roblox asset ID." end
+		    source = source:match("^%s*(.-)%s*$")
+		    if source == "" then return "" end
+		    if #source > 4096 or source:find("[%c]") then return nil, "Ссылка слишком длинная или содержит недопустимые символы." end
+		    local id = source:match("^rbxassetid://(%d+)$") or source:match("^(%d+)$")
+		    if id then
+		        if #id > 20 or not id:find("[1-9]") then return nil, "Некорректный Roblox asset ID." end
+		        return "rbxassetid://" .. id
+		    end
+		    if source:match("^https?://[^/%s?#]+[^%s]*$") then return source end
+		    return nil, "Нужна прямая http/https-ссылка на изображение или Roblox asset ID."
+		end
+
+		local function cacheName(source, extension)
+		    local a, b = 5381, 2166136261
+		    for i = 1, #source do
+		        local byte = source:byte(i)
+		        a = (a * 33 + byte) % 4294967296
+		        b = (b * 65599 + byte) % 4294967296
+		    end
+		    return string.format("bloomware-ui-background-%08x%08x.%s", a, b, extension)
+		end
+
+		-- Resolve data only; image decoding is checked by Appearance before the swap.
+		function Assets.ResolveImage(source)
+		    local normalized, message = Assets.NormalizeImageSource(source)
+		    if not normalized then return nil, message end
+		    if normalized == "" then return nil, "Ссылка на изображение не указана." end
+		    if normalized:match("^rbxassetid://") then return normalized end
+		    if imageCache[normalized] then return imageCache[normalized] end
+		    local registerAsset = getcustomasset or getsynasset
+		    if type(registerAsset) ~= "function" or type(writefile) ~= "function" then
+		        return nil, "Загрузка картинок по URL здесь недоступна. Используй rbxassetid://ID."
+		    end
+		    local downloaded, bytes = pcall(function() return game:HttpGet(normalized) end)
+		    if not downloaded or type(bytes) ~= "string" or #bytes == 0 then
+		        return nil, "Не удалось скачать изображение. Проверь ссылку и соединение."
+		    end
+		    if #bytes > maxImageBytes then return nil, "Изображение превышает 12 МБ. Выбери файл поменьше." end
+		    local extension
+		    if bytes:sub(1, 8) == "\137PNG\13\10\26\10" then extension = "png"
+		    elseif bytes:sub(1, 3) == "\255\216\255" then extension = "jpg"
+		    else return nil, "Ссылка должна вести прямо на PNG или JPG, а не на страницу сайта." end
+		    local ok, uri = pcall(function()
+		        local fileName = cacheName(normalized, extension)
+		        writefile(fileName, bytes)
+		        return registerAsset(fileName)
+		    end)
+		    if not ok or type(uri) ~= "string" or uri == "" then
+		        return nil, "Не удалось открыть скачанное изображение. Попробуй Roblox asset ID."
+		    end
+		    imageCache[normalized] = uri
+		    table.insert(imageCacheOrder, normalized)
+		    if #imageCacheOrder > 16 then imageCache[table.remove(imageCacheOrder, 1)] = nil end
+		    return uri
 		end
 
 		return Assets
@@ -4891,6 +4991,7 @@ local moduleFactories = {
 		local __context, script, require = getModuleContext(56)
 		-- Bloomware UI: typed JSON profiles. No code is executed from profile data.
 		local HttpService = game:GetService("HttpService")
+		local Appearance = require(script.Parent.Appearance)
 		local Profiles = {}
 		Profiles.__index = Profiles
 		local supported = { Toggle=true, Slider=true, Input=true, Dropdown=true, Keybind=true, Colorpicker=true }
@@ -4939,6 +5040,7 @@ local moduleFactories = {
 		    end
 		    if data.UI ~= nil then
 		        if type(data.UI) ~= "table" or data.UI.Theme ~= nil and type(data.UI.Theme) ~= "string" or data.UI.Transparency ~= nil and type(data.UI.Transparency) ~= "boolean" then return false, "Invalid interface settings." end
+		        if data.UI.Background ~= nil and not Appearance.ValidateState(data.UI.Background) then return false, "Invalid background settings." end
 		    end
 		    return true
 		end
@@ -5014,6 +5116,7 @@ local moduleFactories = {
 		end
 		function Profiles:Capture(name)
 		    local data = { Format="BloomwareProfile", Version=1, Name=name or self.Active or "Profile", Options={}, UI={Theme=self.Library.Theme, Transparency=self.Library.Transparency} }
+		    if self.Library.Appearance then data.UI.Background = self.Library.Appearance:Snapshot() end
 		    for id, entry in pairs(self.Entries) do
 		        local option = entry.Option
 		        if not option.IgnoreProfile and self.Library.Options[entry.Id] == option then
@@ -5046,6 +5149,7 @@ local moduleFactories = {
 		    return true
 		end
 		function Profiles:Save(name, overwrite)
+		    if self.Library.Appearance and self.Library.Appearance.Loading then return false, "Дождись загрузки фона перед сохранением профиля." end
 		    local normalized, message = validName(name); if not normalized then return false, message end
 		    name = normalized
 		    if self.Data[name] and not overwrite then return false, "A profile with this name already exists." end
@@ -5113,6 +5217,9 @@ local moduleFactories = {
 		    library._CallbackQueue=nil;self.Applying=false
 		    if not applied then return false,"Profile was not applied: " .. tostring(reason) end
 		    self.Active=name;self.Dirty=false
+		    -- Restore after the callback queue closes so internal control syncing stays silent.
+		    -- Old version-1 profiles without Background preserve the current wallpaper.
+		    if data.UI and data.UI.Background and library.Appearance then library.Appearance:Restore(data.UI.Background) end
 		    local errors=0
 		    for _,call in ipairs(queue)do
 		        if library.Unloaded then break end
@@ -5129,6 +5236,7 @@ local moduleFactories = {
 		    return ok,ok and "Profile deleted." or message
 		end
 		function Profiles:Export(name)
+		    if not name and self.Library.Appearance and self.Library.Appearance.Loading then return nil, "Дождись загрузки фона перед экспортом профиля." end
 		    local data = name and self.Data[name] or self:Capture()
 		    if not data then return nil,"Choose an existing profile." end
 		    local ok,text=pcall(HttpService.JSONEncode,HttpService,data)
@@ -5219,6 +5327,248 @@ local moduleFactories = {
 		end
 		function SearchIndex:Destroy() self.Changed = nil; table.clear(self.Entries) end
 		return SearchIndex
+	end,
+	-- Module: MainModule/Appearance
+	[58] = function()
+		local __context, script, require = getModuleContext(58)
+		-- Bloomware UI: background settings shared by Settings and JSON profiles.
+		local ContentProvider = game:GetService("ContentProvider")
+		local Creator = require(script.Parent.Creator)
+		local Assets = require(script.Parent.Components.Assets)
+		local Appearance = {}
+		Appearance.__index = Appearance
+		local scaleLabels = { Crop = "Заполнить", Fit = "Вписать", Stretch = "Растянуть" }
+		local scaleValues = { ["Заполнить"] = "Crop", ["Вписать"] = "Fit", ["Растянуть"] = "Stretch" }
+		local function finite(value) return type(value) == "number" and value == value and math.abs(value) < math.huge end
+		local function fraction(value, fallback) return finite(value) and math.clamp(value, 0, 1) or fallback end
+
+		function Appearance.ValidateState(state)
+		    if type(state) ~= "table" or type(state.Source) ~= "string" then return false end
+		    local source = Assets.NormalizeImageSource(state.Source)
+		    return source ~= nil and finite(state.Transparency) and state.Transparency >= 0 and state.Transparency <= 1
+		        and finite(state.Darkness) and state.Darkness >= 0 and state.Darkness <= 1 and scaleLabels[state.ScaleType] ~= nil
+		end
+
+		function Appearance.new(library, config)
+		    local self = setmetatable({
+		        Library = library, Paint = library.Window.AcrylicPaint, Generation = 0,
+		        State = { Source = "", Transparency = fraction(config.BackgroundTransparency, 0.25),
+		            Darkness = fraction(config.BackgroundDarkness, 0.35), ScaleType = scaleLabels[config.BackgroundScaleType] and config.BackgroundScaleType or "Crop" },
+		        Status = "Фон не выбран. Вставь прямую ссылку на PNG/JPG или Roblox asset ID.",
+		    }, Appearance)
+		    self:_Render()
+		    Creator.AddSignal(library.Window.Root.Destroying, function() self:Destroy() end)
+		    if config.BackgroundImage and config.BackgroundImage ~= "" then
+		        self:Apply(config.BackgroundImage, true)
+		    end
+		    return self
+		end
+
+		function Appearance:Snapshot()
+		    return { Source = self.State.Source, Transparency = self.State.Transparency,
+		        Darkness = self.State.Darkness, ScaleType = self.State.ScaleType }
+		end
+
+		function Appearance:_Status(message, failed)
+		    if self.Destroyed then return end
+		    self.Status = message
+		    if self.StatusCard then self.StatusCard:SetDesc(message) end
+		    if failed then self.Library:Notify({Title = "Оформление", Content = message, Duration = 6}) end
+		end
+
+		function Appearance:_Dirty()
+		    if self.Library.Profiles then self.Library.Profiles:MarkDirty() end
+		end
+
+		function Appearance:_Render()
+		    if self.Destroyed then return end
+		    local state = self.State
+		    self.Paint.BackgroundImage.ImageTransparency = state.Transparency
+		    self.Paint.BackgroundImage.ScaleType = Enum.ScaleType[state.ScaleType]
+		    self.Paint.BackgroundImage.Visible = state.Source ~= ""
+		    self.Paint.BackgroundOverlay.BackgroundTransparency = 1 - state.Darkness
+		    self.Paint.BackgroundOverlay.Visible = state.Source ~= ""
+		end
+
+		function Appearance:_Sync(includeSource)
+		    if not self.Controls or self.Destroyed then return end
+		    self.Syncing = true
+		    if includeSource then self.Controls.Source:SetValue(self.State.Source) end
+		    self.Controls.Transparency:SetValue(self.State.Transparency * 100)
+		    self.Controls.Darkness:SetValue(self.State.Darkness * 100)
+		    self.Controls.ScaleType:SetValue(scaleLabels[self.State.ScaleType])
+		    self.Syncing = false
+		end
+
+		function Appearance:SetTransparency(value, quiet)
+		    if self.Destroyed or not finite(value) then return false end
+		    value = math.clamp(value, 0, 1)
+		    local changed = self.State.Transparency ~= value
+		    self.State.Transparency = value
+		    self:_Render()
+		    if changed and not quiet then self:_Dirty() end
+		    return true
+		end
+
+		function Appearance:SetDarkness(value, quiet)
+		    if self.Destroyed or not finite(value) then return false end
+		    value = math.clamp(value, 0, 1)
+		    local changed = self.State.Darkness ~= value
+		    self.State.Darkness = value
+		    self:_Render()
+		    if changed and not quiet then self:_Dirty() end
+		    return true
+		end
+
+		function Appearance:SetScaleType(value, quiet)
+		    if self.Destroyed or not scaleLabels[value] then return false end
+		    local changed = self.State.ScaleType ~= value
+		    self.State.ScaleType = value
+		    self:_Render()
+		    if changed and not quiet then self:_Dirty() end
+		    return true
+		end
+
+		function Appearance:_Cancel()
+		    self.Generation = self.Generation + 1
+		    self.Loading = false
+		    self.PendingSource = nil
+		    if self.Timeout then pcall(task.cancel, self.Timeout); self.Timeout = nil end
+		    if self.Probe then self.Probe:Destroy(); self.Probe = nil end
+		end
+
+		function Appearance:Clear(quiet)
+		    if self.Destroyed then return false end
+		    self:_Cancel()
+		    local changed = self.State.Source ~= ""
+		    self.State.Source = ""
+		    self.Paint.BackgroundImage.Image = ""
+		    self:_Render()
+		    self:_Sync(true)
+		    self:_Status("Фон удалён. Можно выбрать другое изображение.")
+		    if changed and not quiet then self:_Dirty() end
+		    return true
+		end
+
+		function Appearance:Apply(source, quiet)
+		    if self.Destroyed then return false, "Интерфейс закрыт." end
+		    self:_Cancel()
+		    local normalized, message = Assets.NormalizeImageSource(source)
+		    if not normalized then self:_Status(message, true); return false, message end
+		    if normalized == "" then return self:Clear(quiet) end
+		    local generation = self.Generation
+		    self.Loading = true
+		    self.PendingSource = normalized
+		    self:_Status("Загружаем изображение… Текущий фон сохранится до завершения.")
+		    if self.Controls then self.Controls.Source:SetValue(normalized) end
+		    local function current() return not self.Destroyed and self.Generation == generation end
+		    local function fail(reason)
+		        if not current() then return end
+		        self:_Cancel()
+		        self:_Status(reason, true)
+		    end
+		    self.Timeout = task.delay(20, function()
+		        self.Timeout = nil
+		        fail("Загрузка заняла слишком много времени. Проверь ссылку и попробуй снова.")
+		    end)
+		    task.spawn(function()
+		        local ok, uri, reason = pcall(Assets.ResolveImage, normalized)
+		        if not current() then return end
+		        if not ok or not uri then fail(ok and reason or "Не удалось загрузить изображение."); return end
+		        local probe = Creator.New("ImageLabel", {
+		            Name = "BackgroundPreload", BackgroundTransparency = 1, Visible = false,
+		            Image = uri, Size = UDim2.fromOffset(1, 1), Parent = self.Library.GUI,
+		        })
+		        self.Probe = probe
+		        local loaded = pcall(function() ContentProvider:PreloadAsync({probe}) end)
+		        if not current() then return end
+		        if not loaded or not probe.IsLoaded then
+		            fail("Изображение недоступно или не поддерживается. Попробуй другую ссылку."); return
+		        end
+		        self:_Cancel()
+		        local changed = self.State.Source ~= normalized
+		        self.Paint.BackgroundImage.Image = uri
+		        self.State.Source = normalized
+		        self:_Render()
+		        self:_Status("Фон применён. Настройки оформления сохраняются в профилях.")
+		        if changed and not quiet then self:_Dirty() end
+		    end)
+		    return true, "Фон загружается."
+		end
+
+		function Appearance:Restore(state)
+		    if self.Destroyed or not Appearance.ValidateState(state) then return false end
+		    self:SetTransparency(state.Transparency, true)
+		    self:SetDarkness(state.Darkness, true)
+		    self:SetScaleType(state.ScaleType, true)
+		    self:_Sync(false)
+		    return self:Apply(state.Source, true)
+		end
+
+		function Appearance:Attach(tab)
+		    if self.Destroyed or self.Attached then return end
+		    self.Attached = tab
+		    local section = tab:AddSection("Оформление")
+		    local source = section:AddInput("Bloomware_BackgroundURL", {
+		        Title = "Изображение фона", Description = "Прямая ссылка PNG/JPG или rbxassetid://ID",
+		        Default = self.PendingSource or self.State.Source, Placeholder = "https://…/background.png", Finished = true, MaxLength = 4096, IgnoreProfile = true,
+		    })
+		    section:AddButton({Title = "Применить фон", Description = "Загрузить изображение по указанной ссылке",
+		        Callback = function() self:Apply(source.Value) end})
+		    section:AddButton({Title = "Удалить фон", Description = "Вернуть стандартный фон интерфейса",
+		        Callback = function() self:Clear() end})
+		    local transparency = section:AddSlider("Bloomware_BackgroundTransparency", {
+		        Title = "Прозрачность изображения", Description = "0 — яркий фон, 100 — невидимый",
+		        Default = self.State.Transparency * 100, Min = 0, Max = 100, Rounding = 0, IgnoreProfile = true,
+		        Callback = function(value) if not self.Syncing then self:SetTransparency(value / 100) end end,
+		    })
+		    local darkness = section:AddSlider("Bloomware_BackgroundDarkness", {
+		        Title = "Затемнение фона", Description = "Помогает сохранить читаемость текста",
+		        Default = self.State.Darkness * 100, Min = 0, Max = 100, Rounding = 0, IgnoreProfile = true,
+		        Callback = function(value) if not self.Syncing then self:SetDarkness(value / 100) end end,
+		    })
+		    local scaleType = section:AddDropdown("Bloomware_BackgroundScaleType", {
+		        Title = "Масштабирование", Values = {"Заполнить", "Вписать", "Растянуть"},
+		        Default = scaleLabels[self.State.ScaleType], Multi = false, IgnoreProfile = true,
+		        Callback = function(value) if not self.Syncing then self:SetScaleType(scaleValues[value]) end end,
+		    })
+		    self.Controls = {Source = source, Transparency = transparency, Darkness = darkness, ScaleType = scaleType}
+		    self.StatusCard = section:AddParagraph({Title = "Фон интерфейса", Content = self.Status})
+		end
+
+		-- Reuse Settings from the host script, or add it after the first user tab.
+		-- Deferring creation preserves the first tab's index and normal startup page.
+		function Appearance:BindWindow(window)
+		    local manager, addTab = self, window.AddTab
+		    function window:AddTab(options)
+		        local title = manager.Library.Search.Fold(options.Title)
+		        local isSettings = title == "settings" or title == "настройки"
+		        if isSettings and self.AppearanceTab then return self.AppearanceTab end
+		        local tab = addTab(self, options)
+		        if isSettings then
+		            self.AppearanceTab = tab
+		            manager:Attach(tab)
+		        elseif not self.AppearanceTab and not self._AppearanceScheduled then
+		            self._AppearanceScheduled = true
+		            task.defer(function()
+		                self._AppearanceScheduled = false
+		                if not self.Destroyed and not manager.Destroyed and not self.AppearanceTab then
+		                    self:AddTab({Title = "Settings", Icon = "settings"})
+		                end
+		            end)
+		        end
+		        return tab
+		    end
+		end
+
+		function Appearance:Destroy()
+		    if self.Destroyed then return end
+		    self:_Cancel()
+		    self.Destroyed = true
+		    self.Controls, self.StatusCard, self.Attached = nil, nil, nil
+		end
+
+		return Appearance
 	end,
 }
 do
