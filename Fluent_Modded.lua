@@ -1,4 +1,4 @@
--- Bloomware UI 1.4.0, based on Fluent 1.1.0 by dawid (MIT).
+-- Bloomware UI 1.4.1, based on Fluent 1.1.0 by dawid (MIT).
 local moduleTree, getModuleContext = {
 	{1, "ModuleScript", {"MainModule"}, {
 		{2, "ModuleScript", {"Acrylic"}, {
@@ -89,7 +89,7 @@ local moduleFactories = {
 		Notification:Init(ScreenGui)
 
 		local Fluent = {
-		    Version = "1.4.0-bloom", OpenFrames = {}, Options = {},
+		    Version = "1.4.1-bloom", OpenFrames = {}, Options = {},
 		    Themes = require(script.Themes).Names,
 		    Window = nil, WindowFrame = nil, Unloaded = false, Theme = "Dark",
 		    DialogOpen = false, UseAcrylic = false, Acrylic = false, Transparency = true,
@@ -571,7 +571,7 @@ local moduleFactories = {
 		    return string.format("bloomware-ui-background-%08x%08x.%s", a, b, extension)
 		end
 
-		-- Resolve data only; image decoding is checked by Appearance before the swap.
+		-- Check downloaded bytes and register a local image URI before changing the background.
 		function Assets.ResolveImage(source)
 		    local normalized, message = Assets.NormalizeImageSource(source)
 		    if not normalized then return nil, message end
@@ -5467,31 +5467,60 @@ local moduleFactories = {
 		        self:_Cancel()
 		        self:_Status(reason, true)
 		    end
+		    local function commit(uri)
+		        if not current() then return end
+		        -- Assign only after URL/file validation, preserving the previous image on error.
+		        local assigned = pcall(function() self.Paint.BackgroundImage.Image = uri end)
+		        if not assigned then
+		            fail("Не удалось назначить изображение фону. Попробуй другой PNG/JPG или Roblox asset ID.")
+		            return
+		        end
+		        self:_Cancel()
+		        local changed = self.State.Source ~= normalized
+		        self.State.Source = normalized
+		        self:_Render()
+		        self:_Status("Фон применён. Настройки оформления сохраняются в профилях.")
+		        if changed and not quiet then self:_Dirty() end
+		    end
 		    self.Timeout = task.delay(20, function()
 		        self.Timeout = nil
-		        fail("Загрузка заняла слишком много времени. Проверь ссылку и попробуй снова.")
+		        fail(normalized:match("^rbxassetid://")
+		            and "Roblox не успел загрузить изображение. Проверь asset ID и попробуй снова."
+		            or "Загрузка заняла слишком много времени. Проверь ссылку и попробуй снова.")
 		    end)
 		    task.spawn(function()
 		        local ok, uri, reason = pcall(Assets.ResolveImage, normalized)
 		        if not current() then return end
 		        if not ok or not uri then fail(ok and reason or "Не удалось загрузить изображение."); return end
+		        -- URL images already passed PNG/JPG validation and the local-asset bridge.
+		        -- Native PreloadAsync/hidden IsLoaded are not authoritative for these URIs.
+		        -- Use the same direct Image assignment as the existing logo loader.
+		        if not normalized:match("^rbxassetid://") then commit(uri); return end
 		        local probe = Creator.New("ImageLabel", {
 		            Name = "BackgroundPreload", BackgroundTransparency = 1, Visible = false,
 		            Image = uri, Size = UDim2.fromOffset(1, 1), Parent = self.Library.GUI,
 		        })
 		        self.Probe = probe
-		        local loaded = pcall(function() ContentProvider:PreloadAsync({probe}) end)
+		        Creator.AddSignal(probe:GetPropertyChangedSignal("IsLoaded"), function()
+		            if current() and probe.IsLoaded then commit(uri) end
+		        end, probe)
+		        local fetchStatus
+		        local loaded = pcall(function()
+		            ContentProvider:PreloadAsync({probe}, function(_, status) fetchStatus = status end)
+		        end)
 		        if not current() then return end
-		        if not loaded or not probe.IsLoaded then
-		            fail("Изображение недоступно или не поддерживается. Попробуй другую ссылку."); return
+		        if probe.IsLoaded or fetchStatus == Enum.AssetFetchStatus.Success then
+		            commit(uri)
+		        elseif not loaded then
+		            fail("Не удалось проверить Roblox asset ID. Попробуй прямую ссылку на PNG/JPG.")
+		        elseif fetchStatus == Enum.AssetFetchStatus.Failure then
+		            fail("Roblox не смог загрузить изображение по этому asset ID. Проверь его доступность.")
+		        elseif fetchStatus == Enum.AssetFetchStatus.TimedOut then
+		            fail("Roblox не успел загрузить изображение. Проверь asset ID и попробуй снова.")
+		        else
+		            -- A false IsLoaded flag alone is inconclusive. Observe changes until timeout.
+		            self:_Status("Ожидаем загрузки изображения от Roblox…")
 		        end
-		        self:_Cancel()
-		        local changed = self.State.Source ~= normalized
-		        self.Paint.BackgroundImage.Image = uri
-		        self.State.Source = normalized
-		        self:_Render()
-		        self:_Status("Фон применён. Настройки оформления сохраняются в профилях.")
-		        if changed and not quiet then self:_Dirty() end
 		    end)
 		    return true, "Фон загружается."
 		end
