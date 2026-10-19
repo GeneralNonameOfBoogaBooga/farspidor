@@ -1,33 +1,4 @@
--- Bloomware UI 1.4.1, based on Fluent 1.1.0 by dawid (MIT).
-local function formatFluentError(message)
-    local text = tostring(message)
-    if debug and type(debug.traceback) == "function" then
-        local ok, traceback = pcall(debug.traceback, text, 2)
-        if ok then return traceback end
-    end
-    return text
-end
-
-local function runFluentStartup(stage, callback)
-    print("[Fluent] " .. stage .. " started")
-    local completed = false
-    local timeout = task.delay(15, function()
-        if not completed then
-            warn("[Fluent] " .. stage .. " is still waiting after 15 seconds.")
-        end
-    end)
-    local result = table.pack(xpcall(callback, formatFluentError))
-    completed = true
-    if timeout and type(task.cancel) == "function" then pcall(task.cancel, timeout) end
-    if not result[1] then
-        local message = "[Fluent] " .. stage .. " failed:\n" .. tostring(result[2])
-        warn(message)
-        error(message, 0)
-    end
-    print("[Fluent] " .. stage .. " finished")
-    return table.unpack(result, 2, result.n)
-end
-
+-- Bloomware UI 1.4.1 based on Fluent 1.1.0 by dawid (MIT).
 local moduleTree, getModuleContext = {
 	{1, "ModuleScript", {"MainModule"}, {
 		{2, "ModuleScript", {"Acrylic"}, {
@@ -100,24 +71,21 @@ local moduleFactories = {
 	[1] = function()
 		local __context, script, require = getModuleContext(1)
 		-- Bloomware UI 1.4, based on Fluent 1.1.0 by dawid (MIT).
-		local Players = game:GetService("Players")
-		local LocalPlayer = Players.LocalPlayer
-		if not LocalPlayer then
-		    local deadline = os.clock() + 10
-		    repeat
-		        task.wait(0.05)
-		        LocalPlayer = Players.LocalPlayer
-		    until LocalPlayer or os.clock() >= deadline
-		end
-		assert(LocalPlayer, "LocalPlayer was not available within 10 seconds; run this library on the client.")
-		local PlayerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 10)
-		assert(PlayerGui and PlayerGui:IsA("PlayerGui"), "PlayerGui was not available within 10 seconds.")
+		local RunService = game:GetService("RunService")
+		local LocalPlayer = game:GetService("Players").LocalPlayer
 		local Creator = require(script.Creator)
 		local Elements = require(script.Elements)
 		local Acrylic = require(script.Acrylic)
 		local Notification = require(script.Components.Notification)
 		local ScreenGui = Creator.New("ScreenGui", { Name = "BloomwareUI" })
-		ScreenGui.Parent = PlayerGui
+		local protected = protectgui or (syn and syn.protect_gui)
+		if protected then pcall(protected, ScreenGui) end
+		if RunService:IsStudio() then
+		    ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+		else
+		    local ok = pcall(function() ScreenGui.Parent = game:GetService("CoreGui") end)
+		    if not ok then ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+		end
 		Notification:Init(ScreenGui)
 
 		local Fluent = {
@@ -144,7 +112,6 @@ local moduleFactories = {
 		    local success, result = pcall(callback, ...)
 		    if not success then
 		        result = tostring(result)
-		        warn("[Fluent] Callback failed: " .. result)
 		        self:Notify({ Title = "Interface", Content = "Callback error", SubContent = result:gsub("^.-:%d+: ", ""), Duration = 5 })
 		    end
 		    return success, result
@@ -193,7 +160,7 @@ local moduleFactories = {
 		end
 		Fluent.Elements = elementMethods
 
-		local function createWindow(self, config)
+		function Fluent:CreateWindow(config)
 		    assert(type(config) == "table" and config.Title, "Window - Missing Title")
 		    if self.Unloaded then error("This interface has been destroyed; load a new instance.") end
 		    if self.Window then return self.Window end
@@ -214,12 +181,6 @@ local moduleFactories = {
 		    self.Appearance = require(script.Appearance).new(self, config)
 		    if config.Appearance ~= false then self.Appearance:BindWindow(window) end
 		    return window
-		end
-
-		function Fluent:CreateWindow(config)
-		    return runFluentStartup("CreateWindow", function()
-		        return createWindow(self, config)
-		    end)
 		end
 
 		function Fluent:SetBackgroundImage(source)
@@ -1993,7 +1954,6 @@ local moduleFactories = {
 		    while current do
 		        local scale = current:FindFirstChildOfClass("UIScale")
 		        if scale then factor = factor * math.max(scale.Scale, 0.01) end
-		        if current:IsA("ScreenGui") then break end
 		        current = current.Parent
 		    end
 		    return factor
@@ -5916,9 +5876,7 @@ do
 			end
 		end
 		if value_82 then
-			return runFluentStartup("library initialization", function()
-				return runModule(value_82)
-			end)
+			return runModule(value_82)
 		end
 	end
 end
