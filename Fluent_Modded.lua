@@ -1,4 +1,4 @@
--- Bloomware UI 1.4.1 based on Fluent 1.1.0 by dawid (MIT).
+-- Bloomware UI 1.5.0, based on Fluent by dawid and Fluent Renewed (MIT).
 local moduleTree, getModuleContext = {
 	{1, "ModuleScript", {"MainModule"}, {
 		{2, "ModuleScript", {"Acrylic"}, {
@@ -63,20 +63,27 @@ local moduleTree, getModuleContext = {
 		}},
 		{56, "ModuleScript", {"Profiles"}},
 		{57, "ModuleScript", {"SearchIndex"}},
-		{58, "ModuleScript", {"Appearance"}}
+		{58, "ModuleScript", {"Appearance"}},
+		{59, "ModuleScript", {"Compatibility"}},
+		{60, "ModuleScript", {"RenewedIcons"}},
+		{61, "ModuleScript", {"IconProvider"}},
+		{62, "ModuleScript", {"RenewedThemes"}}
 	}}
 }
 local moduleFactories = {
 	-- Module: MainModule
 	[1] = function()
 		local __context, script, require = getModuleContext(1)
-		-- Bloomware UI 1.4, based on Fluent 1.1.0 by dawid (MIT).
+		-- Bloomware UI 1.5: Fluent and Fluent Renewed compatible API.
 		local RunService = game:GetService("RunService")
 		local LocalPlayer = game:GetService("Players").LocalPlayer
 		local Creator = require(script.Creator)
 		local Elements = require(script.Elements)
 		local Acrylic = require(script.Acrylic)
 		local Notification = require(script.Components.Notification)
+		local Compatibility = require(script.Compatibility)
+		local Themes = require(script.Themes)
+		local IconProvider = require(script.IconProvider)
 		local ScreenGui = Creator.New("ScreenGui", { Name = "BloomwareUI" })
 		local protected = protectgui or (syn and syn.protect_gui)
 		if protected then pcall(protected, ScreenGui) end
@@ -89,12 +96,17 @@ local moduleFactories = {
 		Notification:Init(ScreenGui)
 
 		local Fluent = {
-		    Version = "1.4.1-bloom", OpenFrames = {}, Options = {},
-		    Themes = require(script.Themes).Names,
+		    Version = "1.5.0-bloom", OpenFrames = {}, Options = {},
+		    Themes = Themes.Names, Loaded = true, CreatedWindow = nil,
 		    Window = nil, WindowFrame = nil, Unloaded = false, Theme = "Dark",
 		    DialogOpen = false, UseAcrylic = false, Acrylic = false, Transparency = true,
 		    MinimizeKeybind = nil, MinimizeKey = Enum.KeyCode.LeftControl, GUI = ScreenGui,
 		}
+		Fluent.Flags = Fluent.Options
+		Fluent.Connections = Creator.Signals
+		Fluent.UIContainer = ScreenGui.Parent
+		Fluent.Utilities = Compatibility.Utilities(Fluent, Creator, Themes, IconProvider)
+		Fluent.OnUnload, Fluent.PostUnload, Fluent.ThemeChanged = Compatibility.Signal(), Compatibility.Signal(), Compatibility.Signal()
 
 		local layoutEvent = Instance.new("BindableEvent")
 		layoutEvent.Name = "LayoutChanged"
@@ -122,48 +134,59 @@ local moduleFactories = {
 		    return math.floor(tonumber(value) * factor + 0.5) / factor
 		end
 
-		local icons = require(script.Icons).assets
 		function Fluent:GetIcon(name)
-		    if type(name) == "string" then return icons["lucide-" .. name] end
-		    return nil
+		    local icon = IconProvider:GetIcon(name)
+		    return icon and icon.Image or nil
 		end
+		function Fluent:GetIconData(name) return IconProvider:GetIcon(name) end
 
 		local elementMethods = {}
 		elementMethods.__index = elementMethods
 		for _, element in ipairs(Elements) do
-		    elementMethods["Add" .. element.__type] = function(container, ...)
+		    local kind = element.__type
+		    local function add(container, first, second)
 		        -- Per-call context prevents callbacks from being redirected to a later tab.
 		        local context = setmetatable({
 		            Container = container.Container, Type = container.Type,
 		            ScrollFrame = container.ScrollFrame, Library = Fluent,
+		            Tab = container.Tab, SectionName = container.SectionName,
+		            InlineCard = container.InlineCard, InlineParent = container.InlineParent, _LinkedToggle = container._LinkedToggle,
 		        }, { __index = element })
-		        local args = table.pack(...)
-		        local option = element.New(context, table.unpack(args, 1, args.n))
-		        local config = type(args[1]) == "table" and args[1] or args[2] or {}
-		        local id = type(args[1]) ~= "table" and args[1] or nil
+		        local id, config = Compatibility.Arguments(Fluent, kind, first, second)
+		        local option
+		        if kind == "Button" or kind == "Paragraph" then option = element.New(context, config)
+		        else option = element.New(context, id, config) end
 		        local card = option._Element or (option.Frame and option)
 		        if card then
-		            if config.Searchable ~= false then
+		            Compatibility.Attach(Fluent, option, card, config, id, kind)
+		            if config.Searchable ~= false and not container.InlineCard then
 		                Fluent.Search:Add(card, { Tab=container.Tab, Section=container.SectionName, Id=id })
 		                local function refreshSearch() if Fluent.Search.Changed then Fluent.Search.Changed() end end
 		                Creator.AddSignal(card.TitleLabel:GetPropertyChangedSignal("Text"), refreshSearch, card.Frame)
 		                Creator.AddSignal(card.DescLabel:GetPropertyChangedSignal("Text"), refreshSearch, card.Frame)
 		            end
 		            if Fluent.Profiles then Fluent.Profiles:Register(id, option, config) end
-		            Creator.AddSignal(card.Frame.Destroying, function()
-		                Fluent.Search:Remove(card)
+		            Creator.AddSignal((option._Owner or card.Frame).Destroying, function()
+		                if not container.InlineCard then Fluent.Search:Remove(card) end
 		                if Fluent.Profiles then Fluent.Profiles:Unregister(id, option) end
+		                if id ~= nil and Fluent.Options[id] == option then Fluent.Options[id] = nil end
 		            end)
 		        end
 		        return option
 		    end
+		    elementMethods["Add" .. kind], elementMethods["Create" .. kind], elementMethods[kind] = add, add, add
+		end
+		for alias, kind in pairs({ColorPicker="Colorpicker", Textbox="Input", TextBox="Input"}) do
+		    for _, prefix in ipairs({"Add", "Create", ""}) do elementMethods[prefix .. alias] = elementMethods["Add" .. kind] end
 		end
 		Fluent.Elements = elementMethods
 
 		function Fluent:CreateWindow(config)
-		    assert(type(config) == "table" and config.Title, "Window - Missing Title")
+		    assert(type(config) == "table", "Window - Expected a configuration table")
+		    config = table.clone(config)
+		    config.Title = config.Title or "Bloomware"
 		    if self.Unloaded then error("This interface has been destroyed; load a new instance.") end
-		    if self.Window then return self.Window end
+		    if self.CreatedWindow then return self.CreatedWindow end
 		    self.MinimizeKey = config.MinimizeKey or self.MinimizeKey
 		    self.UseAcrylic = config.Acrylic == true
 		    self.Acrylic = self.UseAcrylic
@@ -173,8 +196,10 @@ local moduleFactories = {
 		        Parent = ScreenGui, Size = config.Size or UDim2.fromOffset(840, 560),
 		        Title = config.Title, SubTitle = config.SubTitle or "", TabWidth = config.TabWidth or 174,
 		        Logo = config.Logo, AutoScale = config.AutoScale ~= false, MobileMode=config.MobileMode, Search=config.Search ~= false, Profiles=config.Profiles ~= false,
+		        MinSize = config.MinSize, Resize = config.Resize, Mobile = config.Mobile,
 		    })
-		    self.Window = window
+		    self.Window, self.CreatedWindow = window, window
+		    setmetatable(window, { __call = function(_, library, options) return library:CreateWindow(options) end })
 		    self.WindowFrame = window.Root
 		    self:SetTheme(config.Theme or "Dark")
 		    self:ToggleTransparency(config.Transparency ~= false)
@@ -182,6 +207,7 @@ local moduleFactories = {
 		    if config.Appearance ~= false then self.Appearance:BindWindow(window) end
 		    return window
 		end
+		function Fluent:AddWindow(config) return self:CreateWindow(config) end
 
 		function Fluent:SetBackgroundImage(source)
 		    if not self.Appearance then return false, "Create an interface window first." end
@@ -219,6 +245,7 @@ local moduleFactories = {
 		        local changed = self.Theme ~= name
 		        self.Theme = name; Creator.UpdateTheme()
 		        if changed and self.Profiles then self.Profiles:MarkDirty() end
+		        if changed then self.ThemeChanged:Fire(name) end
 		    end
 		end
 
@@ -232,8 +259,10 @@ local moduleFactories = {
 		    if self.Unloaded then return end
 		    self:ClosePopups()
 		    self.Unloaded = true
+		    self.Loaded = false
+		    self.OnUnload:Fire(os.clock())
 		    if self.Appearance then self.Appearance:Destroy() end
-		    if self.Window then self.Window:Destroy() end
+		    if self.CreatedWindow then self.CreatedWindow:Destroy() end
 		    Acrylic.Destroy()
 		    Creator.Disconnect()
 		    ScreenGui:Destroy()
@@ -242,13 +271,16 @@ local moduleFactories = {
 		    self.Search:Destroy()
 		    if self.Profiles then self.Profiles:Destroy() end
 		    self.Window = nil
+		    self.CreatedWindow = nil
 		    self.WindowFrame = nil
 		    self.Appearance = nil
+		    self.PostUnload:Fire(os.clock())
+		    self.OnUnload:Destroy(); self.PostUnload:Destroy(); self.ThemeChanged:Destroy()
 		    if getgenv and getgenv().Fluent == self then getgenv().Fluent = nil end
 		end
 
 		function Fluent:ToggleAcrylic(enabled)
-		    if not self.Window or not self.UseAcrylic then return end
+		    if not self.CreatedWindow or not self.UseAcrylic then return end
 		    self.Acrylic = enabled == true
 		    if self.Acrylic then Acrylic.Enable() else Acrylic.Disable() end
 		    self.Window.AcrylicPaint.SetVisibility(not self.Window.Minimized)
@@ -258,7 +290,7 @@ local moduleFactories = {
 		    local changed = self.Transparency ~= (enabled == true)
 		    self.Transparency = enabled == true
 		    if changed and self.Profiles then self.Profiles:MarkDirty() end
-		    if self.Window then self.Window.AcrylicPaint.Frame.Background.BackgroundTransparency = self.Transparency and 0.06 or 0 end
+		    if self.CreatedWindow then self.Window.AcrylicPaint.Frame.Background.BackgroundTransparency = self.Transparency and 0.06 or 0 end
 		end
 
 		function Fluent:Notify(config)
@@ -266,6 +298,8 @@ local moduleFactories = {
 		    return Notification:New(config)
 		end
 
+		-- Renewed's :Window alias coexists with original Fluent's .Window instance.
+		Fluent.Window = Fluent.CreateWindow
 		if getgenv then getgenv().Fluent = Fluent end
 		return Fluent
 	end,
@@ -696,6 +730,7 @@ local moduleFactories = {
 			Flipper_2.Spring.new, Flipper_2.Instant.new, Creator_6.New, {
 				Window = nil,
 			}
+		local Compatibility = require(Parent_3.Compatibility)
 		function object_9.Init(self_11, argument_25)
 			object_9.Window = argument_25
 			return object_9
@@ -703,7 +738,8 @@ local moduleFactories = {
 		function object_9.Create(self_12)
 			local object_10 = {
 				Buttons = 0,
-		        Closed = false,
+		        IsClosed = false,
+		        Closed = Compatibility.Signal(),
 			}
 			object_10.TintFrame = New_4("TextButton", {
 				Text = "",
@@ -802,10 +838,12 @@ local moduleFactories = {
 		        return object_10.BaseScale
 		    end
 		    Creator_6.AddSignal(object_9.Window.Root:GetPropertyChangedSignal("Size"), function()
-		        if not object_10.Closed then result_4(fitScale()) end
+		        if not object_10.IsClosed then result_4(fitScale()) end
 		    end, object_10.Root)
 		    Creator_6.AddSignal(object_10.TintFrame.Destroying, function()
-		        object_10.Closed = true
+		        object_10.IsClosed = true
+		        if not object_10._ClosedFired then object_10._ClosedFired=true;object_10.Closed:Fire()end
+		        object_10.Closed:Destroy()
 		        if object_9.Active == object_10 then object_9.Active = nil; require(Parent_3).DialogOpen = false end
 		    end)
 			function object_10.Open(self_13)
@@ -817,8 +855,9 @@ local moduleFactories = {
 				result_4(object_10.BaseScale)
 			end
 			function object_10.Close(self_14)
-		        if object_10.Closed then return end
-		        object_10.Closed = true
+		        if object_10.IsClosed then return end
+		        object_10.IsClosed = true
+		        object_10._ClosedFired=true;object_10.Closed:Fire()
 				if object_9.Active == object_10 then object_9.Active = nil; require(Parent_3).DialogOpen = false end
 				result_3(1)
 				result_5(1)
@@ -863,7 +902,8 @@ local moduleFactories = {
 		local Library = require(script.Parent.Parent)
 		local New = Creator.New
 		return function(title, description, parent, interactive)
-		    local element = { Destroyed = false }
+		    Creator.ElementSequence = (Creator.ElementSequence or 0) + 1
+		    local element = { Destroyed = false, CreatedAt = Creator.ElementSequence }
 		    element.TitleLabel = New("TextLabel", {
 		        Text = title or "", TextSize = 13, TextWrapped = true, AutomaticSize = Enum.AutomaticSize.Y,
 		        Size = UDim2.new(1, 0, 0, 16), TextXAlignment = Enum.TextXAlignment.Left,
@@ -902,6 +942,7 @@ local moduleFactories = {
 		        local stacked = control and width < (options.StackWidth or 430)
 		        local controlHeight = control and (mobile and (options.Height or 32) >= 28 and 44 or (options.Height or 32)) or 0
 		        local controlWidth = control and math.min(options.Width or 176, math.max(40, width - 28)) or 0
+		        if mobile and stacked and (options.Height or 32)>=28 then controlWidth=math.max(40,width-28)end
 		        element.LabelHolder.Size = UDim2.new(1, control and not stacked and -(controlWidth + 42) or -28, 0, 0)
 		        local textHeight = layout.AbsoluteContentSize.Y / scale
 		        local height = math.max(mobile and 64 or 56, textHeight + 28 + (stacked and (controlHeight + 12) or 0))
@@ -940,7 +981,17 @@ local moduleFactories = {
 		    end
 		    Creator.AddSignal(Library.LayoutChanged, update, element.Frame)
 		    task.defer(update)
-		    return element
+		    return setmetatable(element, {
+		        __index = function(_, key)
+		            if key == "Title" then return element.TitleLabel.Text end
+		            if key == "Description" or key == "Desc" then return element.DescLabel.Text end
+		        end,
+		        __newindex = function(target, key, value)
+		            if key == "Title" then element:SetTitle(value)
+		            elseif key == "Description" or key == "Desc" then element:SetDesc(value)
+		            else rawset(target, key, value) end
+		        end,
+		    })
 		end
 	end,
 	-- Module: MainModule/Components/Notification
@@ -1194,7 +1245,7 @@ local moduleFactories = {
 		    self.TabCount = self.TabCount + 1
 		    local index = self.TabCount
 		    if iconName == nil then iconName = defaultIcons[title:lower()] end
-		    local icon = Library:GetIcon(iconName) or iconName
+		    local icon = Library:GetIconData(iconName) or iconName
 		    if icon == "" then icon = nil end
 		    local tab = { Selected = false, Name = title, Type = "Tab", Index=index }
 		    tab.Tab = tab
@@ -1215,9 +1266,10 @@ local moduleFactories = {
 		    })
 		    if icon then
 		        tab.Icon = New("ImageLabel", {
-		            Image = icon, Size = UDim2.fromOffset(16, 16), Position = UDim2.new(0, 14, 0.5, -8),
+		            Image = type(icon) == "table" and icon.Image or icon, Size = UDim2.fromOffset(16, 16), Position = UDim2.new(0, 14, 0.5, -8),
 		            Parent = tab.Frame, ThemeTag = { ImageColor3 = "SubText" },
 		        })
+		        Library.Utilities.Icons:SetIcon(tab.Icon, icon)
 		    end
 		    local layout = New("UIListLayout", { Padding = UDim.new(0, 9), SortOrder = Enum.SortOrder.LayoutOrder })
 		    tab.ContainerFrame = New("ScrollingFrame", {
@@ -1240,9 +1292,12 @@ local moduleFactories = {
 		    Creator.AddSignal(tab.Frame.Activated, function() self:SelectTab(index) end)
 		    tab.Container, tab.ScrollFrame = tab.ContainerFrame, tab.ContainerFrame
 		    function tab:AddSection(name)
+		        if type(name) == "table" then name = name.Title or name.Name end
+		        assert(type(name) == "string", "Section - Missing Title")
 		        local section = require(script.Parent.Section)(name, tab.Container)
 		        return setmetatable({ Type = "Section", Container = section.Container, ScrollFrame = tab.Container, Tab=tab, SectionName=name }, Library.Elements)
 		    end
+		    tab.CreateSection, tab.Section = tab.AddSection, tab.AddSection
 		    setmetatable(tab, Library.Elements)
 		    self.Tabs[index], self.Containers[index] = tab, tab.ContainerFrame
 		    if index == 1 then self:SelectTab(1, true) end
@@ -1490,8 +1545,9 @@ local moduleFactories = {
 		        } })
 		    end)
 		    function bar:Layout(mobile)
+		        self.Frame.Size = UDim2.new(1,0,0,mobile and 56 or 64)
 		        self.MenuButton.Frame.Visible = mobile
-		        self.MenuButton.Frame.Position = UDim2.fromOffset(6,10)
+		        self.MenuButton.Frame.Position = UDim2.fromOffset(6,6)
 		        self.MenuButton.Frame.Size = UDim2.fromOffset(44,44)
 		        self.MenuButton.Frame.Icon.Position = UDim2.fromOffset(14,14)
 		        self.MenuButton.Frame.Icon.Size = UDim2.fromOffset(16,16)
@@ -1499,19 +1555,19 @@ local moduleFactories = {
 		        self.DragArea.Position = UDim2.fromOffset(mobile and 52 or 0,0)
 		        self.DragArea.Size = UDim2.new(1,mobile and -152 or -124,1,0)
 		        badge.Size = UDim2.fromOffset(mobile and 32 or 38,mobile and 32 or 38)
-		        badge.Position = UDim2.fromOffset(mobile and 0 or 18,mobile and 16 or 13)
+		        badge.Position = UDim2.fromOffset(mobile and 0 or 18,mobile and 12 or 13)
 		        logo.Size = UDim2.fromOffset(mobile and 30 or 34,mobile and 30 or 34)
 		        logo.Position = UDim2.fromOffset(mobile and 1 or 2,mobile and 1 or 2)
 		        local textLeft = config.Logo == false and (mobile and 0 or 20) or (mobile and 42 or 68)
-		        self.Title.Position = UDim2.fromOffset(textLeft,config.SubTitle == "" and 21 or 13)
+		        self.Title.Position = UDim2.fromOffset(textLeft,mobile and (config.SubTitle == "" and 17 or 9) or (config.SubTitle == "" and 21 or 13))
 		        self.Title.Size = UDim2.new(1,-textLeft-8,0,22)
 		        self.Title.TextSize = mobile and 14 or 16
-		        self.SubTitle.Position = UDim2.fromOffset(textLeft,35)
+		        self.SubTitle.Position = UDim2.fromOffset(textLeft,mobile and 31 or 35)
 		        self.SubTitle.Size = UDim2.new(1,-textLeft-8,0,16)
 		        for _,item in ipairs({{self.MinButton,mobile and 94 or 110},{self.CloseButton,mobile and 48 or 42}}) do
 		            local frame=item[1].Frame
 		            frame.Size = UDim2.fromOffset(mobile and 44 or 28,mobile and 44 or 28)
-		            frame.Position = UDim2.new(1,-item[2],0,mobile and 10 or 18)
+		            frame.Position = UDim2.new(1,-item[2],0,mobile and 6 or 18)
 		            frame.Icon.Position = UDim2.fromOffset(mobile and 15 or 7,mobile and 15 or 7)
 		        end
 		    end
@@ -1529,15 +1585,27 @@ local moduleFactories = {
 		local Acrylic=require(script.Parent.Parent.Acrylic)
 		local Assets=require(script.Parent.Assets)
 		local New=Creator.New
+		local Compatibility=require(script.Parent.Parent.Compatibility)
 		return function(config)
 		    local Library=require(script.Parent.Parent)
 		    local camera=Workspace.CurrentCamera
 		    local viewport=camera and camera.ViewportSize or Vector2.new(1280,720)
-		    local width=math.max(560,config.Size.X.Offset+config.Size.X.Scale*viewport.X)
-		    local height=math.max(380,config.Size.Y.Offset+config.Size.Y.Scale*viewport.Y)
+		    local minimum=config.MinSize or Vector2.new(560,380)
+		    local minWidth,minHeight=math.clamp(minimum.X,240,2048),math.clamp(minimum.Y,180,2048)
+		    local width=config.Size.X.Offset+config.Size.X.Scale*viewport.X
+		    local height=config.Size.Y.Offset+config.Size.Y.Scale*viewport.Y
+		    if config.Resize==true and not Compatibility.MobileMode(config.MobileMode,viewport,UserInputService) then
+		        width,height=Library.Utilities:Resize(width,height)
+		        minWidth,minHeight=Library.Utilities:Resize(minWidth,minHeight)
+		        minWidth,minHeight=math.max(240,minWidth),math.max(180,minHeight)
+		    end
+		    width,height=math.max(minWidth,width),math.max(minHeight,height)
 		    local Window={Minimized=false,Maximized=false,Destroyed=false,CurrentPos=0,Mobile=false,
 		        Size=UDim2.fromOffset(width,height),Position=UDim2.fromOffset(0,0),TabWidth=config.TabWidth,
-		        ContentTop=120,ContentLeft=config.TabWidth+30,ToolActive=nil,DrawerOpen=false}
+		        ContentTop=120,ContentLeft=config.TabWidth+30,ToolActive=nil,DrawerOpen=false,
+		        MinSize=Vector2.new(minWidth,minHeight),Config=config,
+		        OnMinimized=Compatibility.Signal(),PostMinimized=Compatibility.Signal(),
+		        OnMaximized=Compatibility.Signal(),PostMaximized=Compatibility.Signal()}
 		    Window.AcrylicPaint=Acrylic.AcrylicPaint()
 		    Window.Scale=New("UIScale",{Scale=1})
 		    Window.Root=New("Frame",{Name="BloomwareWindow",BackgroundTransparency=1,Size=Window.Size,Parent=config.Parent},{Window.AcrylicPaint.Frame,Window.Scale})
@@ -1636,6 +1704,8 @@ local moduleFactories = {
 		        return true
 		    end
 		    function Window:AddTab(options)return tabs:New(options.Title,options.Icon,self.TabHolder)end
+		    function Window:CreateTab(options)return self:AddTab(options)end
+		    function Window:Tab(options)return self:AddTab(options)end
 		    function Window:SelectTab(index,instant)return tabs:SelectTab(index,instant)end
 
 		    local grip=New("TextButton",{Name="ResizeGrip",Text="",Size=UDim2.fromOffset(26,26),Position=UDim2.new(1,-26,1,-26),BackgroundTransparency=1,Parent=root})
@@ -1645,7 +1715,21 @@ local moduleFactories = {
 		        Position=UDim2.fromOffset(viewport.X-68,math.max(8,viewport.Y/2-26)),ZIndex=100,Parent=config.Parent,
 		        FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json",Enum.FontWeight.Bold),ThemeTag={BackgroundColor3="Sidebar",TextColor3="Accent"}},
 		        {New("UICorner",{CornerRadius=UDim.new(0,16)}),New("UIStroke",{Thickness=1,Transparency=0.2,ThemeTag={Color="Accent"}})})
+		    local function updateRestoreIcon()
+		        local mobile=config.Mobile
+		        if type(mobile)~="table" or type(mobile.GetIcon)~="function" then return end
+		        local ok,icon=pcall(mobile.GetIcon,Window.Minimized)
+		        if not ok or not icon then return end
+		        if not Window.RestoreIcon then
+		            Window.RestoreIcon=New("ImageLabel",{Size=UDim2.new(1,-16,1,-16),Position=UDim2.fromOffset(8,8),
+		                Parent=Window.RestoreButton,ThemeTag={ImageColor3="Accent"}})
+		        end
+		        if Library.Utilities.Icons:SetIcon(Window.RestoreIcon,icon)then Window.RestoreButton.Text=""end
+		        if mobile.Size then Window.RestoreButton.Size=UDim2.fromOffset(math.clamp(mobile.Size.X.Offset,44,60),math.clamp(mobile.Size.Y.Offset,44,60))end
+		    end
+		    updateRestoreIcon()
 		    local floatingInput,floatingOrigin,floatingPosition,floatingMoved,lastFloatingDrag
+		    local dragInput,dragOrigin,dragPosition,resizeInput,resizeOrigin,resizeSize
 		    Creator.AddSignal(Window.RestoreButton.InputBegan,function(input)
 		        if input.UserInputType==Enum.UserInputType.Touch or input.UserInputType==Enum.UserInputType.MouseButton1 then
 		            floatingInput,floatingOrigin,floatingPosition,floatingMoved=input,input.Position,Window.RestoreButton.Position,false
@@ -1657,24 +1741,47 @@ local moduleFactories = {
 		    local function keyboardHeight()
 		        if not Window.Mobile or not UserInputService.OnScreenKeyboardVisible then return 0 end
 		        local size=UserInputService.OnScreenKeyboardSize
-		        return size and math.clamp(size.Y,0,math.max(0,viewport.Y-180)) or 0
+		        return size and math.clamp(size.Y,0,math.max(0,viewport.Y-140)) or 0
 		    end
 		    local lastMobile,desktopSize,desktopPosition=nil,Window.Size,nil
+		    local lastViewport,wasKeyboardOpen,beforeKeyboardPosition=nil,false,nil
 		    local cameraConnection
 		    local function fit(center)
 		        if Window.Destroyed then return end
 		        camera=Workspace.CurrentCamera;viewport=camera and camera.ViewportSize or viewport
-		        local mobile=config.MobileMode
-		        if mobile==nil then mobile=viewport.X<=720 or UserInputService.TouchEnabled==true and math.min(viewport.X,viewport.Y)<600 end
+		        local viewportChanged=lastViewport and (lastViewport.X~=viewport.X or lastViewport.Y~=viewport.Y)
+		        local mobile=Compatibility.MobileMode(config.MobileMode,viewport,UserInputService)
 		        local modeChanged=lastMobile~=mobile
+		        if modeChanged or viewportChanged then dragInput=nil;resizeInput=nil end
 		        if mobile and lastMobile==false then desktopSize,desktopPosition=Window.Size,Window.Position end
 		        if not mobile and lastMobile==true then Window.Size=desktopSize;Window.Position=desktopPosition or Window.Position;Window.Maximized=false;center=true end
 		        Window.Mobile=mobile;Library.Mobile=mobile
 		        local scale,x,y=1,Window.Position.X.Offset,Window.Position.Y.Offset
+		        local availableHeight=viewport.Y-keyboardHeight()
+		        local keyboardOpen=mobile and availableHeight<viewport.Y
 		        if mobile then
 		            Window.Maximized=false
-		            Window.Size=UDim2.fromOffset(math.max(1,viewport.X-16),math.max(1,viewport.Y-keyboardHeight()-16))
-		            x,y=8,8
+		            local portrait=viewport.Y>viewport.X
+		            local margin=math.min(16,math.floor(math.min(viewport.X,availableHeight)*0.05))
+		            local normalWidth=math.floor(math.min(width,720,viewport.X*(portrait and 0.90 or 0.82),viewport.X-2*margin))
+		            local normalHeight=math.floor(math.min(height,560,viewport.Y*(portrait and 0.74 or 0.82)))
+		            -- Floating panel in physical UI pixels: keep text/touch targets readable.
+		            -- The viewport constrains the panel; it must not become the panel's size.
+		            Window.Size=UDim2.fromOffset(
+		                math.max(1,normalWidth),math.max(1,math.floor(math.min(normalHeight,availableHeight-2*margin))))
+		            if modeChanged or viewportChanged then beforeKeyboardPosition=nil end
+		            if keyboardOpen and (modeChanged or viewportChanged) then
+		                beforeKeyboardPosition=UDim2.fromOffset((viewport.X-normalWidth)/2,(viewport.Y-normalHeight)/2)
+		            elseif keyboardOpen and not wasKeyboardOpen then beforeKeyboardPosition=Window.Position end
+		            if not keyboardOpen and wasKeyboardOpen and beforeKeyboardPosition then
+		                x,y=beforeKeyboardPosition.X.Offset,beforeKeyboardPosition.Y.Offset
+		                beforeKeyboardPosition=nil
+		            end
+		            if center or modeChanged or viewportChanged then
+		                x,y=(viewport.X-Window.Size.X.Offset)/2,(availableHeight-Window.Size.Y.Offset)/2
+		            end
+		            x=math.clamp(x,margin,math.max(margin,viewport.X-Window.Size.X.Offset-margin))
+		            y=math.clamp(y,margin,math.max(margin,availableHeight-Window.Size.Y.Offset-margin))
 		        else
 		            if Window.Maximized then Window.Size=UDim2.fromOffset(viewport.X,viewport.Y)end
 		            if not Window.Maximized and config.AutoScale then scale=math.max(0.05,math.min(1,(viewport.X-24)/Window.Size.X.Offset,(viewport.Y-24)/Window.Size.Y.Offset))end
@@ -1685,36 +1792,48 @@ local moduleFactories = {
 		        end
 		        Window.Scale.Scale=scale;root.Size=Window.Size
 		        Window.Position=UDim2.fromOffset(x,y);root.Position=Window.Position
-		        Window.TabWidth=mobile and math.min(260,Window.Size.X.Offset-32) or math.clamp(config.TabWidth,128,math.min(220,Window.Size.X.Offset*0.28))
-		        Window.ContentLeft=mobile and 16 or Window.TabWidth+30
-		        Window.ContentTop=120
-		        sidebar.Size=UDim2.new(0,Window.TabWidth,1,-86);sidebar.ZIndex=mobile and 30 or 1
+		        local compactKeyboard=mobile and keyboardOpen and availableHeight<300
+		        local headerHeight=mobile and 56 or 64
+		        local padding=mobile and 12 or 16
+		        local previousContentTop=Window.ContentTop
+		        Window.TabWidth=mobile and math.min(260,Window.Size.X.Offset-24) or math.clamp(config.TabWidth,128,math.min(220,Window.Size.X.Offset*0.28))
+		        Window.ContentLeft=mobile and padding or Window.TabWidth+30
+		        Window.ContentTop=mobile and (compactKeyboard and 64 or 108) or 120
+		        if previousContentTop~=Window.ContentTop then Window.ContainerPosMotor:setGoal(Flipper.Instant.new(Window.ContentTop))end
+		        sidebar.Position=UDim2.fromOffset(10,headerHeight+(mobile and 8 or 10))
+		        sidebar.Size=UDim2.new(0,Window.TabWidth,1,-headerHeight-(mobile and 20 or 22));sidebar.ZIndex=mobile and 30 or 1
 		        sidebar.BackgroundTransparency=mobile and 0 or 0.12
+		        scrim.Position=UDim2.fromOffset(0,headerHeight);scrim.Size=UDim2.new(1,0,1,-headerHeight)
 		        if modeChanged then Window:SetDrawer(false)end
 		        Window.TitleBar:Layout(mobile)
-		        Window.TabDisplay.Position=UDim2.fromOffset(Window.ContentLeft,78);Window.TabDisplay.TextSize=mobile and 22 or 26
+		        Window.TitleBar.MaxButton.Frame.Icon.Image=Window.Maximized and Assets.Restore or Assets.Max
+		        Window.TabDisplay.Visible=not compactKeyboard
+		        Window.TabDisplay.Position=UDim2.fromOffset(Window.ContentLeft,mobile and 66 or 78);Window.TabDisplay.TextSize=mobile and 20 or 26
+		        Window.SearchButton.Frame.Visible=config.Search and not compactKeyboard
+		        Window.ProfileButton.Frame.Visible=config.Profiles and not compactKeyboard
 		        local toolWidth=mobile and 44 or 100
 		        local toolCount=(config.Search and 1 or 0)+(config.Profiles and 1 or 0)
 		        local reserved=toolCount>0 and toolCount*(toolWidth+8) or 0
-		        Window.TabDisplay.Size=UDim2.new(1,-Window.ContentLeft-16-reserved,0,32)
-		        local right=16
+		        Window.TabDisplay.Size=UDim2.new(1,-Window.ContentLeft-padding-reserved,0,32)
+		        local right=padding
 		        for _,button in ipairs({Window.ProfileButton,Window.SearchButton})do
 		            if button.Frame.Visible then
 		                button.Frame.Size=UDim2.fromOffset(toolWidth,mobile and 44 or 36)
-		                button.Frame.Position=UDim2.new(1,-right-toolWidth,0,mobile and 72 or 76)
+		                button.Frame.Position=UDim2.new(1,-right-toolWidth,0,mobile and 60 or 76)
 		                button.Label.Visible=not mobile;button.Icon.Position=UDim2.new(0,mobile and 14 or 10,0.5,-8)
 		                right=right+toolWidth+8
 		            end
 		        end
 		        for _,frame in ipairs({Window.ContainerHolder,Window.SearchPanel and Window.SearchPanel.Frame or false,Window.ProfilePanel and Window.ProfilePanel.Frame or false})do
-		            if frame then frame.Position=UDim2.fromOffset(Window.ContentLeft,Window.ContentTop);frame.Size=UDim2.new(1,-Window.ContentLeft-16,1,-Window.ContentTop-16)end
+		            if frame then frame.Position=UDim2.fromOffset(Window.ContentLeft,Window.ContentTop);frame.Size=UDim2.new(1,-Window.ContentLeft-padding,1,-Window.ContentTop-padding)end
 		        end
+		        if Window.SearchPanel then Window.SearchPanel:Layout()end
 		        if Window.ProfilePanel then Window.ProfilePanel:Layout(mobile)end
 		        grip.Visible=not mobile and not Window.Maximized
 		        local fp=Window.RestoreButton.Position
 		        Window.RestoreButton.Position=UDim2.fromOffset(math.clamp(fp.X.Offset,8,math.max(8,viewport.X-60)),math.clamp(fp.Y.Offset,8,math.max(8,viewport.Y-60)))
 		        if modeChanged then Library._LayoutEvent:Fire(mobile)end
-		        lastMobile=mobile
+		        lastMobile=mobile;lastViewport=viewport;wasKeyboardOpen=keyboardOpen
 		        Library:ClosePopups()
 		    end
 		    Window.RefreshLayout=function()fit(false)end
@@ -1746,20 +1865,23 @@ local moduleFactories = {
 		    for _,property in ipairs({"OnScreenKeyboardVisible","OnScreenKeyboardSize"})do
 		        Creator.AddSignal(UserInputService:GetPropertyChangedSignal(property),function()fit(false);task.defer(keepFocusVisible)end,root)
 		    end
-		    Creator.AddSignal(UserInputService:GetPropertyChangedSignal("TouchEnabled"),function()fit(false)end,root)
+		    for _,property in ipairs({"TouchEnabled","PreferredInput","KeyboardEnabled"})do
+		        Creator.AddSignal(UserInputService:GetPropertyChangedSignal(property),function()fit(false)end,root)
+		    end
 		    fit(true);bindCamera()
 		    local restoredSize,restoredPosition
 		    Window.Maximize=function(enabled,keepPosition)
 		        if Window.Mobile then return false end
 		        enabled=enabled==true;if enabled==Window.Maximized then return end
+		        Window.OnMaximized:Fire(os.clock())
 		        if enabled then restoredSize,restoredPosition=Window.Size,Window.Position;Window.Size=UDim2.fromOffset(viewport.X,viewport.Y)
 		        else Window.Size=restoredSize or UDim2.fromOffset(width,height);if not keepPosition then Window.Position=restoredPosition or Window.Position end end
 		        Window.Maximized=enabled;Window.TitleBar.MaxButton.Frame.Icon.Image=enabled and Assets.Restore or Assets.Max;fit(false)
+		        Window.PostMaximized:Fire(os.clock())
 		        return true
 		    end
-		    local dragInput,dragOrigin,dragPosition,resizeInput,resizeOrigin,resizeSize
 		    Creator.AddSignal(Window.TitleBar.DragArea.InputBegan,function(input)
-		        if Window.Mobile then return end
+		        if Window.Minimized or Window.Destroyed or Library.DialogOpen or dragInput then return end
 		        if input.UserInputType~=Enum.UserInputType.MouseButton1 and input.UserInputType~=Enum.UserInputType.Touch then return end
 		        if Window.Maximized then Window.Maximize(false)end
 		        dragInput,dragOrigin,dragPosition=input,input.Position,Window.Position;Library:ClosePopups()
@@ -1777,12 +1899,12 @@ local moduleFactories = {
 		            if delta.Magnitude>6 then floatingMoved=true end
 		            Window.RestoreButton.Position=UDim2.fromOffset(math.clamp(floatingPosition.X.Offset+delta.X,8,math.max(8,viewport.X-60)),math.clamp(floatingPosition.Y.Offset+delta.Y,8,math.max(8,viewport.Y-60)))
 		        end
-		        if dragInput and not Window.Mobile and (mouse and dragInput.UserInputType==Enum.UserInputType.MouseButton1 or input==dragInput)then
+		        if dragInput and (mouse and dragInput.UserInputType==Enum.UserInputType.MouseButton1 or input==dragInput)then
 		            local delta=input.Position-dragOrigin;Window.Position=UDim2.fromOffset(dragPosition.X.Offset+delta.X,dragPosition.Y.Offset+delta.Y);fit(false)
 		        end
 		        if resizeInput and not Window.Mobile and (mouse and resizeInput.UserInputType==Enum.UserInputType.MouseButton1 or input==resizeInput)then
 		            local delta=(input.Position-resizeOrigin)/Window.Scale.Scale
-		            Window.Size=UDim2.fromOffset(math.clamp(resizeSize.X.Offset+delta.X,560,2048),math.clamp(resizeSize.Y.Offset+delta.Y,380,2048));fit(false)
+		            Window.Size=UDim2.fromOffset(math.clamp(resizeSize.X.Offset+delta.X,minWidth,2048),math.clamp(resizeSize.Y.Offset+delta.Y,minHeight,2048));fit(false)
 		        end
 		    end,root)
 		    local controlPending,controlUsed
@@ -1811,16 +1933,22 @@ local moduleFactories = {
 		        if ctrl and input.KeyCode==Enum.KeyCode.K and not Window.Minimized then Window:ShowSearch();return end
 		        if UserInputService:GetFocusedTextBox()then return end
 		        local keybind=Library.MinimizeKeybind
-		        local expected=type(keybind)=="table"and keybind.Type=="Keybind"and keybind.Value or Library.MinimizeKey.Name
-		        if input.KeyCode.Name==expected then
+		        if type(keybind)=="table"and keybind.Picking then return end
+		        local expected=Compatibility.InputName(type(keybind)=="table"and keybind.Type=="Keybind"and keybind.Value or Library.MinimizeKey)
+		        local actual=input.UserInputType==Enum.UserInputType.Keyboard and input.KeyCode.Name or Compatibility.InputName(input.UserInputType)
+		        if actual==expected then
 		            if input.KeyCode==Enum.KeyCode.LeftControl or input.KeyCode==Enum.KeyCode.RightControl then controlPending,controlUsed=expected,false
 		            elseif not ctrl then Window:Minimize()end
 		        end
 		    end,root)
 		    function Window:SetMinimized(minimized)
+		        if self.Destroyed then return end
+		        self.OnMinimized:Fire(os.clock(),root.Visible)
 		        self.Minimized=minimized==true;self:SetDrawer(false);self:CloseTools();Library:ClosePopups()
 		        root.Visible=not self.Minimized;self.RestoreButton.Visible=self.Minimized
+		        updateRestoreIcon()
 		        if Library.UseAcrylic then self.AcrylicPaint.SetVisibility(not self.Minimized)end
+		        self.PostMinimized:Fire(os.clock(),root.Visible)
 		    end
 		    function Window:Minimize()self:SetMinimized(not self.Minimized)end
 		    local dialogs=require(script.Parent.Dialog):Init(Window)
@@ -1837,7 +1965,9 @@ local moduleFactories = {
 		            dialog.Root.Size=UDim2.fromOffset(available,math.max(190,content.AbsoluteSize.Y/Window.Scale.Scale+150))
 		        end,dialog.Root)
 		        for _,button in ipairs(options.Buttons or{})do dialog:Button(button.Title,button.Callback)end
-		        dialog:Open();return dialog
+		        dialog:Open()
+		        if options.Yield then dialog.Closed:Wait()end
+		        return dialog
 		    end
 		    function Window:Destroy()
 		        if self.Destroyed then return end
@@ -1847,6 +1977,7 @@ local moduleFactories = {
 		        if self.AcrylicPaint.Model then self.AcrylicPaint.Model:Destroy()end
 		        if cameraConnection then cameraConnection:Disconnect()end
 		        self.RestoreButton:Destroy();root:Destroy()
+		        for _,event in ipairs({self.OnMinimized,self.PostMinimized,self.OnMaximized,self.PostMaximized})do event:Destroy()end
 		    end
 		    return Window
 		end
@@ -2014,7 +2145,7 @@ local moduleFactories = {
 			})
 			value_28:SetControl(ImageLabel, { Width = 18, Height = 18, StackWidth = 220 })
 			Creator_14.AddSignal(value_28.Frame.Activated, function()
-				self_39.Library:SafeCallback(argument_84.Callback)
+				self_39.Library:SafeCallback(argument_84.Callback, argument_84.Value)
 			end)
 			return value_28
 		end
@@ -2041,6 +2172,8 @@ local moduleFactories = {
 				Type = "Colorpicker",
 				Title = type(argument_86.Title) == "string" and argument_86.Title or "Colorpicker",
 				Callback = argument_86.Callback or function(argument_87) end,
+				Changed = argument_86.Changed,
+				UpdateOnChange = argument_86.UpdateOnChange == true or argument_86.UpdateWhileSliding == true,
 			}
 			function config_3.SetHSVFromRGB(self_41, argument_88)
 				local toHSV, result_7, extraResult = Color3.toHSV(argument_88)
@@ -2052,6 +2185,7 @@ local moduleFactories = {
 			local value_29 =
 				require(Components_4.Element)(argument_86.Title, argument_86.Description, self_40.Container, true)
 			config_3._Element = value_29
+			config_3.Instance = value_29
 			config_3.SetTitle = value_29.SetTitle
 			config_3.SetDesc = value_29.SetDesc
 			local Frame_5 = New_13("Frame", {
@@ -2293,15 +2427,16 @@ local moduleFactories = {
 						ImageLabel_2.Position = UDim2.new(Sat, 0, 1 - Vib, 0)
 						Frame_7.BackgroundColor3 = Color3.fromHSV(Hue, Sat, Vib)
 						callback_21.Input.Text = "#" .. Color3.fromHSV(Hue, Sat, Vib):ToHex()
-						callback_22.Input.Text = callback_20().R
-						callback_23.Input.Text = callback_20().G
-						callback_24.Input.Text = callback_20().B
+						callback_22.Input.Text = tostring(callback_20().R)
+						callback_23.Input.Text = tostring(callback_20().G)
+						callback_24.Input.Text = tostring(callback_20().B)
 						if argument_86.Transparency then
 							value_34.BackgroundColor3 = Color3.fromHSV(Hue, Sat, Vib)
 							Frame_7.BackgroundTransparency = Transparency
 							value_33.Position = UDim2.new(0, -1, 1 - Transparency, -6)
 							value_31.Input.Text = require(Parent_17):Round((1 - Transparency) * 100, 0) .. "%"
 						end
+						if config_3.UpdateOnChange then config_3:SetValue({Hue,Sat,Vib},Transparency) end
 					end
 					Creator_15.AddSignal(callback_21.Input.FocusLost, function(argument_91)
 						if argument_91 then
@@ -2426,11 +2561,11 @@ local moduleFactories = {
 			end
 			function config_3.OnChanged(self_45, callback_30)
 				config_3.Changed = callback_30
-				callback_30(config_3.Value)
+				Library:SafeCallback(callback_30,config_3.Value)
 			end
 			function config_3.Destroy(self_46)
 				value_29:Destroy()
-				Library.Options[argument_85] = nil
+				if Library.Options[argument_85] == config_3 then Library.Options[argument_85] = nil end
 			end
 			Creator_15.AddSignal(value_29.Frame.Activated, function()
 				callback_29()
@@ -2451,17 +2586,27 @@ local moduleFactories = {
 		local Creator = require(script.Parent.Parent.Creator)
 		local New = Creator.New
 		local Dropdown = { __type = "Dropdown" }
+		local function valuesArray(values)
+		    local result = {}
+		    for _, value in ipairs(values or {}) do table.insert(result,value) end
+		    for key, value in pairs(values or {}) do
+		        if type(key)~="number" or key<1 or key%1~=0 or key>#(values or {}) then table.insert(result,value) end
+		    end
+		    return result
+		end
 		function Dropdown:New(id, config)
 		    assert(config.Title, "Dropdown - Missing Title")
 		    local Library = self.Library
 		    local scrollFrame = self.ScrollFrame
 		    local card = require(script.Parent.Parent.Components.Element)(config.Title, config.Description, self.Container, false)
 		    local option = {
-		        Values = config.Values or {}, Value = config.Multi and {} or nil, Multi = config.Multi == true,
-		        Buttons = {}, Opened = false, Type = "Dropdown", Callback = config.Callback or function() end,
+		        Values = valuesArray(config.Values), Value = config.Multi and {} or nil, Multi = config.Multi == true,
+		        AutoDeselect=config.AutoDeselect==true, Displayer=config.Displayer or tostring,
+		        Buttons = {}, Opened = false, Type = "Dropdown", Callback = config.Callback or function() end, Changed=config.Changed,
 		    }
 		    option.SetTitle, option.SetDesc = card.SetTitle, card.SetDesc
 		    option._Element = card
+		    option.Instance = card
 		    local button = New("TextButton", {
 		        Text = "", BackgroundTransparency = 0.12,
 		        ThemeTag = { BackgroundColor3 = "DropdownFrame" },
@@ -2496,16 +2641,23 @@ local moduleFactories = {
 		    }, { New("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }) })
 		    table.insert(Library.OpenFrames, popup)
 		    local destroyed, previousScroll = false, true
+		    local function displayValue(value)
+		        local ok, text = pcall(option.Displayer,value)
+		        return ok and tostring(text) or tostring(value)
+		    end
 		    local function normalize(value)
 		        if not option.Multi then
 		            if type(value) == "number" and not table.find(option.Values,value) then value = option.Values[value] end
-		            return table.find(option.Values, value) and value or nil
+		            if table.find(option.Values,value)then return value end
+		            return nil
 		        end
 		        local result = {}
 		        if type(value) == "table" then
 		            for key, item in pairs(value) do
-		                local selected = type(key) == "number" and type(item) ~= "boolean" and item or (item and key or nil)
-		                if selected and table.find(option.Values, selected) then result[selected] = true end
+		                local selected
+		                if type(key) == "number" and type(item) ~= "boolean" then selected=item
+		                elseif item then selected=key end
+		                if selected ~= nil and table.find(option.Values, selected) then result[selected] = true end
 		            end
 		        elseif value ~= nil then
 		            local selected = type(value) == "number" and option.Values[value] or value
@@ -2517,9 +2669,9 @@ local moduleFactories = {
 		    function option:Display()
 		        if self.Multi then
 		            local selected = {}
-		            for _, value in ipairs(self.Values) do if self.Value[value] then table.insert(selected, tostring(value)) end end
+		            for _, value in ipairs(self.Values) do if self.Value[value] then table.insert(selected, displayValue(value)) end end
 		            label.Text = #selected > 0 and table.concat(selected, ", ") or "Select..."
-		        else label.Text = self.Value ~= nil and tostring(self.Value) or "Select..." end
+		        else label.Text = self.Value ~= nil and displayValue(self.Value) or "Select..." end
 		    end
 		    function option:GetActiveValues()
 		        if not self.Multi then return self.Value ~= nil and 1 or 0 end
@@ -2572,7 +2724,7 @@ local moduleFactories = {
 		                ThemeTag = { BackgroundColor3 = "DropdownOption" },
 		            }, { New("UICorner", { CornerRadius = UDim.new(0, 6) }) })
 		            New("TextLabel", {
-		                Text = tostring(value), TextSize = 12, TextTruncate = Enum.TextTruncate.AtEnd,
+		                Text = displayValue(value), TextSize = 12, TextTruncate = Enum.TextTruncate.AtEnd,
 		                TextXAlignment = Enum.TextXAlignment.Left, Size = UDim2.new(1, -40, 1, 0), Position = UDim2.fromOffset(10, 0),
 		                FontFace = Font.new("rbxasset://fonts/families/GothamSSm.json"), ZIndex = 53, Parent = row,
 		                ThemeTag = { TextColor3 = selected and "Accent" or "Text" },
@@ -2588,6 +2740,7 @@ local moduleFactories = {
 		                    local active = self:GetActiveValues()
 		                    if self.Value[value] and #active == 1 and not config.AllowNull then return end
 		                    self.Value[value] = not self.Value[value] and true or nil
+		                    if self.AutoDeselect then self:Close() end
 		                else
 		                    if self.Value == value then
 		                        if config.AllowNull then self.Value = nil end
@@ -2616,12 +2769,12 @@ local moduleFactories = {
 		        Library:SafeCallback(self.Changed, self.Value)
 		    end
 		    function option:SetValues(values)
-		        if values then self.Values = values end
+		        if values then self.Values = valuesArray(values) end
 		        self.Value = normalize(self.Value)
 		        self:Display()
 		        self:BuildDropdownList()
 		    end
-		    function option:OnChanged(callback) self.Changed = callback; callback(self.Value) end
+		    function option:OnChanged(callback) self.Changed = callback; Library:SafeCallback(callback,self.Value) end
 		    local function inside(point, frame)
 		        local p, s = frame.AbsolutePosition, frame.AbsoluteSize
 		        return point.X >= p.X and point.X <= p.X + s.X and point.Y >= p.Y and point.Y <= p.Y + s.Y
@@ -2667,10 +2820,12 @@ local moduleFactories = {
 		    card:SetControl(field.Frame, { Width = 176, Height = 32 })
 		    local option = {
 		        Value = tostring(config.Default or ""), Numeric = config.Numeric == true,
-		        Finished = config.Finished == true, Callback = config.Callback or function() end, Type = "Input",
+		        Finished = config.Finished == true, Callback = config.Callback or function() end, Changed=config.Changed, Type = "Input",
+		        ClearOnFocusLost = config.ClearOnFocusLost == true,
 		    }
 		    option.SetTitle, option.SetDesc = card.SetTitle, card.SetDesc
 		    option._Element = card
+		    option.Instance = card
 		    field.Input.Text = option.Value
 		    field.Input.PlaceholderText = config.Placeholder or "Enter a value"
 		    local changing = false
@@ -2696,13 +2851,16 @@ local moduleFactories = {
 		    end
 		    if option.Finished then
 		        -- Commit on Enter, clicking elsewhere, and dismissing a touch keyboard.
-		        Creator.AddSignal(field.Input.FocusLost, function() option:SetValue(field.Input.Text) end)
+		        Creator.AddSignal(field.Input.FocusLost, function()
+		            option:SetValue(field.Input.Text)
+		            if option.ClearOnFocusLost and not card.Destroyed then changing=true;field.Input.Text="";changing=false end
+		        end)
 		    else
 		        Creator.AddSignal(field.Input:GetPropertyChangedSignal("Text"), function()
 		            if not changing then option:SetValue(field.Input.Text) end
 		        end)
 		    end
-		    function option:OnChanged(callback) self.Changed = callback; callback(self.Value) end
+		    function option:OnChanged(callback) self.Changed = callback; Library:SafeCallback(callback,self.Value) end
 		    function option:Destroy()
 		        card:Destroy()
 		        if Library.Options[id] == self then Library.Options[id] = nil end
@@ -2719,77 +2877,85 @@ local moduleFactories = {
 		local UserInputService = game:GetService("UserInputService")
 		local Creator = require(script.Parent.Parent.Creator)
 		local New = Creator.New
+		local Compatibility = require(script.Parent.Parent.Compatibility)
 		local Keybind = { __type = "Keybind" }
 		function Keybind:New(id, config)
 		    assert(config.Title and config.Default, "Keybind - Missing Title or Default")
 		    local Library = self.Library
-		    local card = require(script.Parent.Parent.Components.Element)(config.Title, config.Description, self.Container, true)
+		    local inline, linkedToggle = self.InlineCard ~= nil, self._LinkedToggle
+		    local card = self.InlineCard or require(script.Parent.Parent.Components.Element)(config.Title, config.Description, self.Container, true)
 		    local option = {
-		        Value = config.Default, Mode = config.Mode or "Toggle", Toggled = false, Type = "Keybind",
+		        Value = Compatibility.KeyName(config.Default) or "None", Mode = config.Mode or "Toggle", Toggled = false, Type = "Keybind",
 		        Callback = config.Callback or function() end, ChangedCallback = config.ChangedCallback or function() end,
 		    }
 		    option.SetTitle, option.SetDesc = card.SetTitle, card.SetDesc
 		    option._Element = card
+		    option.Instance = card
 		    local button = New("TextButton", {
 		        Text = option.Value, TextSize = 12, BackgroundTransparency = 0.78,
 		        FontFace = Font.new("rbxasset://fonts/families/GothamSSm.json", Enum.FontWeight.Medium),
 		        ThemeTag = { TextColor3 = "Text", BackgroundColor3 = "Keybind" },
 		    }, { New("UICorner", { CornerRadius = UDim.new(0, 7) }), New("UIStroke", { Transparency = 0.55, ThemeTag = { Color = "InElementBorder" } }) })
-		    card:SetControl(button, { Width = 118, Height = 32, StackWidth = 320 })
+		    if inline then button.Parent=self.InlineParent; option._Owner=button
+		    else card:SetControl(button, { Width = 118, Height = 32, StackWidth = 320 }) end
+		    option.Button = button
 		    local picking, ready = false, false
 		    local function inputName(input)
 		        if input.UserInputType == Enum.UserInputType.Keyboard then return input.KeyCode.Name end
 		        if input.UserInputType == Enum.UserInputType.MouseButton1 then return "MouseLeft" end
 		        if input.UserInputType == Enum.UserInputType.MouseButton2 then return "MouseRight" end
+		        if input.UserInputType == Enum.UserInputType.MouseButton3 then return "MouseMiddle" end
 		        return nil
 		    end
 		    function option:GetState()
 		        if self.Mode == "Always" then return true end
 		        if UserInputService:GetFocusedTextBox() then return false end
 		        if self.Mode == "Toggle" then return self.Toggled end
-		        if self.Value == "None" then return false end
-		        if self.Value == "MouseLeft" or self.Value == "MouseRight" then
-		            return UserInputService:IsMouseButtonPressed(self.Value == "MouseLeft" and Enum.UserInputType.MouseButton1 or Enum.UserInputType.MouseButton2)
+		        local name = Compatibility.InputName(self.Value)
+		        if name == "None" then return false end
+		        if name == "MouseLeft" or name == "MouseRight" or name == "MouseMiddle" then
+		            return UserInputService:IsMouseButtonPressed(Enum.UserInputType[name == "MouseLeft" and "MouseButton1" or name == "MouseRight" and "MouseButton2" or "MouseButton3"])
 		        end
 		        local ok, pressed = pcall(function() return UserInputService:IsKeyDown(Enum.KeyCode[self.Value]) end)
 		        return ok and pressed or false
 		    end
 		    function option:SetValue(value, mode)
-		        self.Value = value or self.Value
-		        self.Mode = mode or self.Mode
+		        self.Value = Compatibility.KeyName(value) or self.Value
+		        if mode == "Toggle" or mode == "Hold" or mode == "Always" then self.Mode = mode end
 		        button.Text = self.Value
+		        Library:SafeCallback(self.ChangedCallback, value or self.Value)
+		        Library:SafeCallback(self.Changed, self.Value)
 		    end
 		    function option:DoClick()
+		        if linkedToggle then linkedToggle:SetValue(not linkedToggle.Value) end
 		        Library:SafeCallback(self.Callback, self.Toggled)
 		        Library:SafeCallback(self.Clicked, self.Toggled)
 		    end
 		    function option:OnClick(callback) self.Clicked = callback end
-		    function option:OnChanged(callback) self.Changed = callback; callback(self.Value) end
+		    function option:OnChanged(callback) self.Changed = callback; Library:SafeCallback(callback,self.Value) end
 		    Creator.AddSignal(button.Activated, function()
-		        picking, ready = true, false
+		        picking, ready, option.Picking = true, false, true
 		        button.Text = "Press a key..."
 		        task.delay(0.15, function() if not card.Destroyed then ready = true end end)
 		    end)
 		    Creator.AddSignal(UserInputService.InputBegan, function(input)
 		        if picking then
 		            if not ready then return end
-		            if input.KeyCode == Enum.KeyCode.Escape then picking = false; button.Text = option.Value; return end
+		            if input.KeyCode == Enum.KeyCode.Escape then picking,option.Picking = false,false; button.Text = option.Value; return end
 		            local value = inputName(input)
 		            if value then
 		                if value == "Backspace" then value = "None" end
-		                picking = false
+		                picking,option.Picking = false,false
 		                option:SetValue(value)
-		                Library:SafeCallback(option.ChangedCallback, input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode or input.UserInputType)
-		                Library:SafeCallback(option.Changed, option.Value)
 		            end
 		            return
 		        end
-		        if not UserInputService:GetFocusedTextBox() and inputName(input) == option.Value and option.Mode == "Toggle" then
+		        if not UserInputService:GetFocusedTextBox() and inputName(input) == Compatibility.InputName(option.Value) and option.Mode == "Toggle" then
 		            option.Toggled = not option.Toggled
 		            option:DoClick()
 		        end
-		    end, card.Frame)
-		    function option:Destroy() picking = false; card:Destroy(); if Library.Options[id] == self then Library.Options[id] = nil end end
+		    end, inline and button or card.Frame)
+		    function option:Destroy() picking = false; if inline then button:Destroy() else card:Destroy() end; if Library.Options[id] == self then Library.Options[id] = nil end end
 		    Library.Options[id] = option
 		    return option
 		end
@@ -2798,23 +2964,37 @@ local moduleFactories = {
 	-- Module: MainModule/Elements/Paragraph
 	[25] = function()
 		local __context, script, require = getModuleContext(25)
-		-- Reconstructed module: MainModule/Elements/Paragraph
-		-- Author: dawid | License: MIT (original Fluent header).
-		local Parent_21 = script.Parent.Parent
-		local Components_8, Flipper_11, Creator_19, object_39 =
-			Parent_21.Components, require(Parent_21.Packages.Flipper), require(Parent_21.Creator), {}
-		object_39.__index = object_39
-		object_39.__type = "Paragraph"
-		function object_39.New(self_69, argument_122)
-			assert(argument_122.Title, "Paragraph - Missing Title")
-			argument_122.Content = argument_122.Content or ""
-			local value_52 =
-				require(Components_8.Element)(argument_122.Title, argument_122.Content, self_69.Container, false)
-			value_52.Frame.BackgroundTransparency = Creator_19.GetThemeProperty("ElementTransparency")
-			value_52.Border.Transparency = 0.6
-			return value_52
+		-- Both AddParagraph{...} and CreateParagraph("id", {...}) are supported.
+		local Creator = require(script.Parent.Parent.Creator)
+		local Paragraph = { __type="Paragraph" }
+		function Paragraph:New(config)
+		    assert(config.Title, "Paragraph - Missing Title")
+		    local Library = self.Library
+		    local card = require(script.Parent.Parent.Components.Element)(config.Title, config.Content or "", self.Container, false)
+		    local option = { Type="Paragraph", Value=config.Content or "", Callback=config.Callback, _Element=card }
+		    -- Preserve original Fluent's returned card fields and Renewed's value API.
+		    setmetatable(option, {
+		        __index=card,
+		        __newindex=function(target,key,value)
+		            if key=="Title" then card:SetTitle(value)
+		            elseif key=="Description" or key=="Desc" then target:SetValue(value)
+		            else rawset(target,key,value) end
+		        end,
+		    })
+		    function option:SetValue(value)
+		        self.Value = tostring(value or "")
+		        card:SetDesc(self.Value)
+		        Library:SafeCallback(self.Callback, self.Value)
+		        Library:SafeCallback(self.Changed, self.Value)
+		    end
+		    option.SetContent = option.SetValue
+		    function option:SetDesc(value) self:SetValue(value) end
+		    function option:OnChanged(callback) self.Changed=callback; Library:SafeCallback(callback, self.Value) end
+		    card.Frame.BackgroundTransparency = Creator.GetThemeProperty("ElementTransparency")
+		    card.Border.Transparency = 0.6
+		    return option
 		end
-		return object_39
+		return Paragraph
 	end,
 	-- Module: MainModule/Elements/Slider
 	[26] = function()
@@ -2827,15 +3007,16 @@ local moduleFactories = {
 		function Slider:New(id, config)
 		    assert(config.Title, "Slider - Missing Title")
 		    assert(type(config.Default) == "number", "Slider - Missing default value")
-		    assert(type(config.Min) == "number" and type(config.Max) == "number" and config.Max > config.Min, "Slider - Max must be greater than Min")
+		    assert(type(config.Min) == "number" and type(config.Max) == "number", "Slider - Min and Max must be numbers")
 		    local Library = self.Library
 		    local card = require(script.Parent.Parent.Components.Element)(config.Title, config.Description, self.Container, false)
 		    local option = {
-		        Value = config.Default, Min = config.Min, Max = config.Max, Rounding = config.Rounding or 0,
-		        Callback = config.Callback or function() end, Type = "Slider",
+		        Value = config.Default, Min = math.min(config.Min,config.Max), Max = math.max(config.Min,config.Max), Rounding = config.Rounding or 0,
+		        Callback = config.Callback or function() end, Changed=config.Changed, Type = "Slider",
 		    }
 		    option.SetTitle, option.SetDesc = card.SetTitle, card.SetDesc
 		    option._Element = card
+		    option.Instance = card
 		    local holder = New("Frame", { BackgroundTransparency = 1 })
 		    card:SetControl(holder, { Width = 204, Height = 32 })
 		    local label = New("TextLabel", {
@@ -2859,14 +3040,15 @@ local moduleFactories = {
 		    }, { New("UICorner", { CornerRadius = UDim.new(1, 0) }) })
 		    function option:SetValue(value)
 		        value = tonumber(value)
-		        if not value then return end
+		        if not value or value~=value or math.abs(value)==math.huge then return end
+		        local oldValue = self.Value
 		        self.Value = math.clamp(Library:Round(math.clamp(value, self.Min, self.Max), self.Rounding), self.Min, self.Max)
-		        local ratio = (self.Value - self.Min) / (self.Max - self.Min)
+		        local ratio = self.Max==self.Min and 0 or (self.Value - self.Min) / (self.Max - self.Min)
 		        fill.Size, knob.Position, label.Text = UDim2.fromScale(ratio, 1), UDim2.fromScale(ratio, 0.5), tostring(self.Value)
-		        Library:SafeCallback(self.Callback, self.Value)
-		        Library:SafeCallback(self.Changed, self.Value)
+		        Library:SafeCallback(self.Callback, self.Value,oldValue)
+		        Library:SafeCallback(self.Changed, self.Value,oldValue)
 		    end
-		    function option:OnChanged(callback) self.Changed = callback; callback(self.Value) end
+		    function option:OnChanged(callback) self.Changed = callback; Library:SafeCallback(callback,self.Value,self.Value) end
 		    local dragging
 		    local function point(input)
 		        if rail.AbsoluteSize.X <= 0 then return end
@@ -2900,9 +3082,10 @@ local moduleFactories = {
 		    assert(config.Title, "Toggle - Missing Title")
 		    local Library = self.Library
 		    local card = require(script.Parent.Parent.Components.Element)(config.Title, config.Description, self.Container, true)
-		    local option = { Value = config.Default == true, Callback = config.Callback or function() end, Type = "Toggle" }
+		    local option = { Value = config.Default == true, Callback = config.Callback or function() end, Changed=config.Changed, Type = "Toggle" }
 		    option.SetTitle, option.SetDesc = card.SetTitle, card.SetDesc
 		    option._Element = card
+		    option.Instance = card
 		    local stroke = New("UIStroke", { Transparency = 0.55, ThemeTag = { Color = "ToggleSlider" } })
 		    local knob = New("Frame", {
 		        Size = UDim2.fromOffset(16, 16), Position = UDim2.fromOffset(3, 3),
@@ -2913,7 +3096,7 @@ local moduleFactories = {
 		    }, { New("UICorner", { CornerRadius = UDim.new(1, 0) }), stroke, knob })
 		    card:SetControl(track, { Width = 42, Height = 22, StackWidth = 240 })
 		    local animation
-		    function option:OnChanged(callback) self.Changed = callback; callback(self.Value) end
+		    function option:OnChanged(callback) self.Changed = callback; Library:SafeCallback(callback,self.Value) end
 		    function option:SetValue(value)
 		        self.Value = not not value
 		        Creator.OverrideTag(track, { BackgroundColor3 = self.Value and "Accent" or "ToggleSlider" })
@@ -2933,7 +3116,21 @@ local moduleFactories = {
 		        card:Destroy()
 		        if Library.Options[id] == self then Library.Options[id] = nil end
 		    end
-		    Creator.AddSignal(card.Frame.Activated, function() option:SetValue(not option.Value) end)
+		    local context = self
+		    local attached
+		    local function addKeybind(_, keyId, keyConfig)
+		        if attached then return attached end
+		        local holder = New("Frame", {BackgroundTransparency=1})
+		        card:SetControl(holder, {Width=172, Height=32, StackWidth=360})
+		        track.Parent=holder;track.Size=UDim2.fromOffset(42,22);track.Position=UDim2.new(1,0,0.5,-11);track.AnchorPoint=Vector2.new(1,0)
+		        attached = Library.Elements.AddKeybind({Container=context.Container,Type=context.Type,ScrollFrame=context.ScrollFrame,
+		            Tab=context.Tab,SectionName=context.SectionName,InlineCard=card,InlineParent=holder,_LinkedToggle=option}, keyId, keyConfig)
+		        attached.Button.Size=UDim2.new(1,-54,1,0)
+		        option.Keybind=attached
+		        return attached
+		    end
+		    option.Keybind,option.AddKeybind,option.CreateKeybind=addKeybind,addKeybind,addKeybind
+		    Creator.AddSignal(card.Frame.Activated, function() if not attached or not attached.Picking then option:SetValue(not option.Value) end end)
 		    Library.Options[id] = option
 		    option:SetValue(option.Value)
 		    return option
@@ -4501,6 +4698,15 @@ local moduleFactories = {
 			local item_34 = require(item_33)
 			object_57[item_34.Name] = item_34
 		end
+		local renewed = require(script.Parent.RenewedThemes)
+		for _, name in ipairs(renewed.Names) do
+		    if not object_57[name] then
+		        local theme = renewed[name]
+		        theme.Name = name
+		        object_57[name] = theme
+		        table.insert(object_57.Names, name)
+		    end
+		end
 		return object_57
 	end,
 	-- Module: MainModule/Themes/Amethyst
@@ -4930,6 +5136,17 @@ local moduleFactories = {
 		        if result then return window:Reveal(result.Entry) end
 		        return false
 		    end
+		    function panel:Layout()
+		        local height=window.Size.Y.Offset*self.Frame.Size.Y.Scale+self.Frame.Size.Y.Offset
+		        local compact=window.Mobile and height<190
+		        local changed=self.Compact~=compact
+		        self.Compact=compact
+		        self.Status.Visible=not compact
+		        local top=compact and 52 or 90
+		        self.List.Position=UDim2.fromOffset(0,top)
+		        self.List.Size=UDim2.new(1,0,1,-top)
+		        if changed and self.Frame.Visible then self:Refresh()end
+		    end
 		    function panel:Refresh()
 		        if window.Destroyed or not self.Frame.Visible then return end
 		        for _,row in ipairs(self.Rows)do row.Frame:Destroy()end
@@ -4938,25 +5155,26 @@ local moduleFactories = {
 		        self.Results=results
 		        local query=library.Search.Fold(self.Input.Text)
 		        self.Status.Text=query=="" and "Type a setting name, description or tab." or (total==0 and "No settings found. Try another word." or (tostring(total).." settings found"..(total>#results and " · showing the first 100" or "")))
+		        local rowHeight=self.Compact and 56 or 70
 		        for index,result in ipairs(results)do
 		            local row=New("TextButton",{
-		                Text="",Size=UDim2.new(1,0,0,70),LayoutOrder=index,Parent=self.List,
+		                Text="",Size=UDim2.new(1,0,0,rowHeight),LayoutOrder=index,Parent=self.List,
 		                ThemeTag={BackgroundColor3="Element",BackgroundTransparency="ElementTransparency"},
 		            },{New("UICorner",{CornerRadius=UDim.new(0,10)}),New("UIStroke",{Transparency=0.6,ThemeTag={Color="ElementBorder"}})})
 		            local title=New("TextLabel",{
 		                Text=result.Title,TextSize=13,TextTruncate=Enum.TextTruncate.AtEnd,TextXAlignment=Enum.TextXAlignment.Left,
-		                Size=UDim2.new(1,-28,0,22),Position=UDim2.fromOffset(14,10),Parent=row,
+		                Size=UDim2.new(1,-28,0,22),Position=UDim2.fromOffset(14,self.Compact and 6 or 10),Parent=row,
 		                FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json",Enum.FontWeight.Medium),ThemeTag={TextColor3="Text"},
 		            })
 		            New("TextLabel",{
 		                Text=result.Path,TextSize=11,TextTruncate=Enum.TextTruncate.AtEnd,TextXAlignment=Enum.TextXAlignment.Left,
-		                Size=UDim2.new(1,-28,0,20),Position=UDim2.fromOffset(14,36),Parent=row,
+		                Size=UDim2.new(1,-28,0,20),Position=UDim2.fromOffset(14,self.Compact and 29 or 36),Parent=row,
 		                FontFace=Font.new("rbxasset://fonts/families/GothamSSm.json"),ThemeTag={TextColor3="SubText"},
 		            })
 		            Creator.AddSignal(row.Activated,function()self:Choose(index)end,row)
 		            self.Rows[index]={Frame=row,Title=title}
 		        end
-		        self.List.CanvasSize=UDim2.fromOffset(0,#results*78)
+		        self.List.CanvasSize=UDim2.fromOffset(0,#results*(rowHeight+8))
 		        self:Select(1)
 		    end
 		    function panel:Open(query)
@@ -4992,6 +5210,7 @@ local moduleFactories = {
 		-- Bloomware UI: typed JSON profiles. No code is executed from profile data.
 		local HttpService = game:GetService("HttpService")
 		local Appearance = require(script.Parent.Appearance)
+		local Compatibility = require(script.Parent.Compatibility)
 		local Profiles = {}
 		Profiles.__index = Profiles
 		local supported = { Toggle=true, Slider=true, Input=true, Dropdown=true, Keybind=true, Colorpicker=true }
@@ -5174,8 +5393,9 @@ local moduleFactories = {
 		        local values = entry.Multi and entry.Value or (entry.Value~=nil and {entry.Value} or {})
 		        for _,value in ipairs(values) do if not table.find(option.Values,value) then return false,"Dropdown option is no longer available." end end
 		    end
-		    if option.Type == "Keybind" and entry.Value ~= "None" and entry.Value ~= "MouseLeft" and entry.Value ~= "MouseRight" then
-		        local valid,key = pcall(function()return Enum.KeyCode[entry.Value]end)
+		    local keyName = option.Type == "Keybind" and Compatibility.InputName(entry.Value) or nil
+		    if keyName and keyName ~= "None" and keyName ~= "MouseLeft" and keyName ~= "MouseRight" and keyName ~= "MouseMiddle" then
+		        local valid,key = pcall(function()return Enum.KeyCode[keyName]end)
 		        if not valid or not key then return false,"Unknown key binding." end
 		    end
 		    return true
@@ -5598,6 +5818,13578 @@ local moduleFactories = {
 		end
 
 		return Appearance
+	end,
+	-- Module: MainModule/Compatibility
+	[59] = function()
+		local __context, script, require = getModuleContext(59)
+		-- Fluent / Fluent Renewed argument and utility compatibility.
+		local Compatibility = {}
+		local mouseKeys = {
+		    MB1="MouseLeft", MouseButton1="MouseLeft", LeftMousebutton="MouseLeft", LeftMouseButton="MouseLeft",
+		    MB2="MouseRight", MouseButton2="MouseRight", RightMousebutton="MouseRight", RightMouseButton="MouseRight",
+		    MB3="MouseMiddle", MouseButton3="MouseMiddle", MiddleMousebutton="MouseMiddle", MiddleMouseButton="MouseMiddle",
+		}
+		function Compatibility.MobileMode(forced, viewport, input)
+		    if forced ~= nil then return forced == true end
+		    local touch = input.TouchEnabled == true
+		    local prefersTouch = touch and (input.PreferredInput == Enum.PreferredInput.Touch or input.KeyboardEnabled ~= true)
+		    local shortSide = math.min(viewport.X,viewport.Y)
+		    return viewport.X <= 720 or touch and (shortSide < 600 or prefersTouch and shortSide <= 900)
+		end
+
+		function Compatibility.KeyName(value)
+		    if value == nil then return nil end
+		    if type(value) ~= "string" then
+		        local ok, name = pcall(function() return value.Name end)
+		        if not ok or type(name) ~= "string" then return nil end
+		        value = name
+		    end
+		    value = value:gsub("^Enum%.KeyCode%.", ""):gsub("^Enum%.UserInputType%.", "")
+		    if value == "Unknown" then return "None" end
+		    return value
+		end
+
+		function Compatibility.InputName(value)
+		    local name = Compatibility.KeyName(value)
+		    return mouseKeys[name] or name
+		end
+
+		function Compatibility.Alignment(value)
+		    if type(value) == "string" then
+		        if value == "Middle" then value = "Center" end
+		        if value == "Left" or value == "Center" or value == "Right" then return Enum.TextXAlignment[value] end
+		        return nil
+		    end
+		    return value
+		end
+
+		function Compatibility.Arguments(library, kind, first, second)
+		    local id, config
+		    if type(first) == "table" then
+		        config = table.clone(first)
+		        id = config.Id or config.ID or config.Idx or config.Flag
+		    else
+		        id, config = first, type(second) == "table" and table.clone(second) or {}
+		    end
+		    if config.Default == nil then config.Default = config.Value end
+		    if kind == "Paragraph" then
+		        if config.Content == nil then config.Content = config.Value or "" end
+		    elseif kind == "Keybind" then
+		        config.Title = config.Title or "Keybind"
+		        config.Default = Compatibility.KeyName(config.Default) or "None"
+		    elseif kind == "Slider" then
+		        config.Title = config.Title or "Slider"
+		        config.Min = config.Min == nil and 0 or config.Min
+		        config.Default = config.Default == nil and config.Min or config.Default
+		    end
+		    if id == nil and kind ~= "Button" and kind ~= "Paragraph" then
+		        library._AutomaticOptionId = (library._AutomaticOptionId or 0) + 1
+		        id = "__Bloomware_" .. kind .. "_" .. library._AutomaticOptionId
+		    end
+		    return id, config
+		end
+
+		function Compatibility.Attach(library, option, card, config, id, kind)
+		    option.Instance = card
+		    option.Type = option.Type or kind
+		    option.Id = id
+		    if config.Changed and option.Changed == nil then option.Changed = config.Changed end
+		    local titleAlignment = Compatibility.Alignment(config.TitleAlignment)
+		    local descriptionAlignment = Compatibility.Alignment(config.DescriptionAlignment or config.ContentAlignment)
+		    if titleAlignment then card.TitleLabel.TextXAlignment = titleAlignment end
+		    if descriptionAlignment then card.DescLabel.TextXAlignment = descriptionAlignment end
+		    if id ~= nil then library.Options[id] = option end
+		end
+
+		function Compatibility.Signal()
+		    -- Schedule callbacks independently of the signal's lifetime. In particular,
+		    -- destroying the UI must not cancel queued OnUnload/PostUnload handlers.
+		    local signal = { _Connections={}, _Destroyed=false }
+		    function signal:Connect(callback)
+		        assert(not self._Destroyed, "Cannot connect to a destroyed signal")
+		        assert(type(callback)=="function", "Signal callback must be a function")
+		        local connection = {Connected=true,Callback=callback}
+		        local owner=self
+		        function connection:Disconnect()
+		            if not self.Connected then return end
+		            self.Connected=false
+		            local index=table.find(owner._Connections,self)
+		            if index then table.remove(owner._Connections,index) end
+		        end
+		        connection.Destroy=connection.Disconnect
+		        table.insert(self._Connections, connection)
+		        return connection
+		    end
+		    function signal:Once(callback)
+		        local connection=self:Connect(callback)
+		        connection.Once=true
+		        return connection
+		    end
+		    function signal:Wait()
+		        local thread=coroutine.running()
+		        self:Once(function(...) task.spawn(thread,...) end)
+		        return coroutine.yield()
+		    end
+		    function signal:Fire(...)
+		        if self._Destroyed then return end
+		        for _,connection in ipairs(table.clone(self._Connections))do
+		            if connection.Connected then
+		                if connection.Once then connection:Disconnect()end
+		                task.spawn(connection.Callback,...)
+		            end
+		        end
+		    end
+		    function signal:DisconnectAll()
+		        for _, connection in ipairs(table.clone(self._Connections)) do connection:Disconnect() end
+		        table.clear(self._Connections)
+		    end
+		    function signal:Destroy() self:DisconnectAll(); self._Destroyed=true end
+		    signal.connect, signal.once, signal.wait, signal.fire = signal.Connect, signal.Once, signal.Wait, signal.Fire
+		    return signal
+		end
+
+		function Compatibility.Utilities(library, creator, themes, icons)
+		    local utilities = { Creator=creator, Themes=themes, Icons=icons, Shared=shared or _G }
+		    function utilities:GetIcon(name) return icons:GetIcon(name) end
+		    function utilities:Resize(x, y)
+		        local camera = game:GetService("Workspace").CurrentCamera
+		        local viewport = camera and camera.ViewportSize or Vector2.new(1920, 1080)
+		        return viewport.X * x / 1920, viewport.Y * y / 1080
+		    end
+		    function utilities:Truncate(number, decimals, round)
+		        local factor = 10 ^ math.max(0, decimals or 0)
+		        return (round and math.floor(number * factor + 0.5) or math.floor(number * factor)) / factor
+		    end
+		    function utilities:Round(number, decimals) return self:Truncate(number, decimals, true) end
+		    function utilities:Prettify(value)
+		        if type(value) == "number" then return self:Round(value, 2) end
+		        local name = Compatibility.KeyName(value) or tostring(value)
+		        return (name:gsub("(%l)(%u)", "%1 %2"))
+		    end
+		    function utilities:Clone(value)
+		        if type(value) ~= "table" then return value, false end
+		        local copies = {}
+		        local function copy(item)
+		            if type(item) ~= "table" then return item end
+		            if copies[item] then return copies[item] end
+		            local result = {}; copies[item] = result
+		            for key, entry in pairs(item) do result[copy(key)] = copy(entry) end
+		            local meta = getmetatable(item)
+		            if type(meta) == "table" then setmetatable(result, meta) end
+		            return result
+		        end
+		        return copy(value), true
+		    end
+		    function utilities:GetOS()
+		        local ok, gui = pcall(game.GetService, game, "GuiService")
+		        if ok and gui then
+		            local success, console = pcall(gui.IsTenFootInterface, gui)
+		            if success and console then return "Console" end
+		            local windows, isWindows = pcall(function() return gui.IsWindows end)
+		            if windows and isWindows then return "Windows" end
+		        end
+		        local input = game:GetService("UserInputService")
+		        if library.Mobile or input.TouchEnabled and not input.KeyboardEnabled then return "Mobile" end
+		        return "Unknown"
+		    end
+		    return utilities
+		end
+
+		return Compatibility
+	end,
+	-- Module: MainModule/RenewedIcons
+	[60] = function()
+		local __context, script, require = getModuleContext(60)
+		-- Imported from Fluent Renewed (ActualMasterOogway), MIT.
+		--[[
+		MIT License 
+
+		Copyright (c) 2024-present ActualMasterOogway
+
+		Permission is hereby granted, free of charge, to any person obtaining a copy
+		of this software and associated documentation files (the "Software"), to deal
+		in the Software without restriction, including without limitation the rights
+		to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+		copies of the Software, and to permit persons to whom the Software is
+		furnished to do so, subject to the following conditions:
+
+		The above copyright notice and this permission notice shall be included in all
+		copies or substantial portions of the Software.
+
+		THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+		IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+		FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+		AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+		LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+		OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+		SOFTWARE.
+		]]
+		local atlases = {
+		    [1]="rbxassetid://124334518624683",
+		    [2]="rbxassetid://113826256227095",
+		    [3]="rbxassetid://129900432084566",
+		    [4]="rbxassetid://118976126805967",
+		    [5]="rbxassetid://125298981894618",
+		    [6]="rbxassetid://131738208650267",
+		    [7]="rbxassetid://110728422432625",
+		    [8]="rbxassetid://135200213477510",
+		    [9]="rbxassetid://134392099945785",
+		    [10]="rbxassetid://79415505456349",
+		    [11]="rbxassetid://94499019266816",
+		    [12]="rbxassetid://72284904787415",
+		    [13]="rbxassetid://72284904787415",
+		    [14]="rbxassetid://102465529977025",
+		    [15]="rbxassetid://108796161822566",
+		    [16]="rbxassetid://104034552823126",
+		    [17]="rbxassetid://115396960406352",
+		    [18]="rbxassetid://88000092080903",
+		    [19]="rbxassetid://74902412828188",
+		    [20]="rbxassetid://95092644481468",
+		    [21]="rbxassetid://116618277156257",
+		    [22]="rbxassetid://101225869294852",
+		    [23]="rbxassetid://130974669650190",
+		    [24]="rbxassetid://122510634246659",
+		    [25]="rbxassetid://130565723724393",
+		    [26]="rbxassetid://130172565496219",
+		    [27]="rbxassetid://100537559853437",
+		    [28]="rbxassetid://77444842975129",
+		    [29]="rbxassetid://133795234078681",
+		    [30]="rbxassetid://88182585007332",
+		    [31]="rbxassetid://123183581552431",
+		    [32]="rbxassetid://108153633480449",
+		    [33]="rbxassetid://116280890977475",
+		    [34]="rbxassetid://97148406853110",
+		    [35]="rbxassetid://138968597001035",
+		    [36]="rbxassetid://129030569615452",
+		    [37]="rbxassetid://97278475063854",
+		    [38]="rbxassetid://138343757151795",
+		    [39]="rbxassetid://131684019420923",
+		    [40]="rbxassetid://139123669104105",
+		    [41]="rbxassetid://83798598825627",
+		    [42]="rbxassetid://93555120675964",
+		}
+		local data = [=[
+		a-arrow-down;1;0;0;64;64
+		a-arrow-up;1;64;0;64;64
+		a-large-small;1;128;0;64;64
+		accessibility;1;192;0;64;64
+		activity;1;256;0;64;64
+		air-vent;1;320;0;64;64
+		airplay;1;384;0;64;64
+		alarm-clock-check;1;448;0;64;64
+		alarm-clock-minus;1;512;0;64;64
+		alarm-clock-off;1;576;0;64;64
+		alarm-clock-plus;1;640;0;64;64
+		alarm-clock;1;704;0;64;64
+		alarm-smoke;1;768;0;64;64
+		album;1;832;0;64;64
+		align-center-horizontal;1;896;0;64;64
+		align-center-vertical;1;960;0;64;64
+		align-center;1;0;64;64;64
+		align-end-horizontal;1;64;64;64;64
+		align-end-vertical;1;128;64;64;64
+		align-horizontal-distribute-center;1;192;64;64;64
+		align-horizontal-distribute-end;1;256;64;64;64
+		align-horizontal-distribute-start;1;320;64;64;64
+		align-horizontal-justify-center;1;384;64;64;64
+		align-horizontal-justify-end;1;448;64;64;64
+		align-horizontal-justify-start;1;512;64;64;64
+		align-horizontal-space-around;1;576;64;64;64
+		align-horizontal-space-between;1;640;64;64;64
+		align-justify;1;704;64;64;64
+		align-left;1;768;64;64;64
+		align-right;1;832;64;64;64
+		align-start-horizontal;1;896;64;64;64
+		align-start-vertical;1;960;64;64;64
+		align-vertical-distribute-center;1;0;128;64;64
+		align-vertical-distribute-end;1;64;128;64;64
+		align-vertical-distribute-start;1;128;128;64;64
+		align-vertical-justify-center;1;192;128;64;64
+		align-vertical-justify-end;1;256;128;64;64
+		align-vertical-justify-start;1;320;128;64;64
+		align-vertical-space-around;1;384;128;64;64
+		align-vertical-space-between;1;448;128;64;64
+		ambulance;1;512;128;64;64
+		ampersand;1;576;128;64;64
+		ampersands;1;640;128;64;64
+		amphora;1;704;128;64;64
+		anchor;1;768;128;64;64
+		angry;1;832;128;64;64
+		annoyed;1;896;128;64;64
+		antenna;1;960;128;64;64
+		anvil;1;0;192;64;64
+		aperture;1;64;192;64;64
+		app-window-mac;1;128;192;64;64
+		app-window;1;192;192;64;64
+		apple;1;256;192;64;64
+		archive-restore;1;320;192;64;64
+		archive-x;1;384;192;64;64
+		archive;1;448;192;64;64
+		armchair;1;512;192;64;64
+		arrow-big-down-dash;1;576;192;64;64
+		arrow-big-down;1;640;192;64;64
+		arrow-big-left-dash;1;704;192;64;64
+		arrow-big-left;1;768;192;64;64
+		arrow-big-right-dash;1;832;192;64;64
+		arrow-big-right;1;896;192;64;64
+		arrow-big-up-dash;1;960;192;64;64
+		arrow-big-up;1;0;256;64;64
+		arrow-down-0-1;1;64;256;64;64
+		arrow-down-1-0;1;128;256;64;64
+		arrow-down-a-z;1;192;256;64;64
+		arrow-down-from-line;1;256;256;64;64
+		arrow-down-left;1;320;256;64;64
+		arrow-down-narrow-wide;1;384;256;64;64
+		arrow-down-right;1;448;256;64;64
+		arrow-down-to-dot;1;512;256;64;64
+		arrow-down-to-line;1;576;256;64;64
+		arrow-down-up;1;640;256;64;64
+		arrow-down-wide-narrow;1;704;256;64;64
+		arrow-down-z-a;1;768;256;64;64
+		arrow-down;1;832;256;64;64
+		arrow-left-from-line;1;896;256;64;64
+		arrow-left-right;1;960;256;64;64
+		arrow-left-to-line;1;0;320;64;64
+		arrow-left;1;64;320;64;64
+		arrow-right-from-line;1;128;320;64;64
+		arrow-right-left;1;192;320;64;64
+		arrow-right-to-line;1;256;320;64;64
+		arrow-right;1;320;320;64;64
+		arrow-up-0-1;1;384;320;64;64
+		arrow-up-1-0;1;448;320;64;64
+		arrow-up-a-z;1;512;320;64;64
+		arrow-up-down;1;576;320;64;64
+		arrow-up-from-dot;1;640;320;64;64
+		arrow-up-from-line;1;704;320;64;64
+		arrow-up-left;1;768;320;64;64
+		arrow-up-narrow-wide;1;832;320;64;64
+		arrow-up-right;1;896;320;64;64
+		arrow-up-to-line;1;960;320;64;64
+		arrow-up-wide-narrow;1;0;384;64;64
+		arrow-up-z-a;1;64;384;64;64
+		arrow-up;1;128;384;64;64
+		arrows-up-from-line;1;192;384;64;64
+		asterisk;1;256;384;64;64
+		at-sign;1;320;384;64;64
+		atom;1;384;384;64;64
+		audio-lines;1;448;384;64;64
+		audio-waveform;1;512;384;64;64
+		award;1;576;384;64;64
+		axe;1;640;384;64;64
+		axis-3d;1;704;384;64;64
+		baby;1;768;384;64;64
+		backpack;1;832;384;64;64
+		badge-alert;1;896;384;64;64
+		badge-cent;1;960;384;64;64
+		badge-check;1;0;448;64;64
+		badge-dollar-sign;1;64;448;64;64
+		badge-euro;1;128;448;64;64
+		badge-help;1;192;448;64;64
+		badge-indian-rupee;1;256;448;64;64
+		badge-info;1;320;448;64;64
+		badge-japanese-yen;1;384;448;64;64
+		badge-minus;1;448;448;64;64
+		badge-percent;1;512;448;64;64
+		badge-plus;1;576;448;64;64
+		badge-pound-sterling;1;640;448;64;64
+		badge-russian-ruble;1;704;448;64;64
+		badge-swiss-franc;1;768;448;64;64
+		badge-x;1;832;448;64;64
+		badge;1;896;448;64;64
+		baggage-claim;1;960;448;64;64
+		ban;1;0;512;64;64
+		banana;1;64;512;64;64
+		bandage;1;128;512;64;64
+		banknote;1;192;512;64;64
+		barcode;1;256;512;64;64
+		baseline;1;320;512;64;64
+		bath;1;384;512;64;64
+		battery-charging;1;448;512;64;64
+		battery-full;1;512;512;64;64
+		battery-low;1;576;512;64;64
+		battery-medium;1;640;512;64;64
+		battery-warning;1;704;512;64;64
+		battery;1;768;512;64;64
+		beaker;1;832;512;64;64
+		bean-off;1;896;512;64;64
+		bean;1;960;512;64;64
+		bed-double;1;0;576;64;64
+		bed-single;1;64;576;64;64
+		bed;1;128;576;64;64
+		beef;1;192;576;64;64
+		beer-off;1;256;576;64;64
+		beer;1;320;576;64;64
+		bell-dot;1;384;576;64;64
+		bell-electric;1;448;576;64;64
+		bell-minus;1;512;576;64;64
+		bell-off;1;576;576;64;64
+		bell-plus;1;640;576;64;64
+		bell-ring;1;704;576;64;64
+		bell;1;768;576;64;64
+		between-horizontal-end;1;832;576;64;64
+		between-horizontal-start;1;896;576;64;64
+		between-vertical-end;1;960;576;64;64
+		between-vertical-start;1;0;640;64;64
+		biceps-flexed;1;64;640;64;64
+		bike;1;128;640;64;64
+		binary;1;192;640;64;64
+		binoculars;1;256;640;64;64
+		biohazard;1;320;640;64;64
+		bird;1;384;640;64;64
+		bitcoin;1;448;640;64;64
+		blend;1;512;640;64;64
+		blinds;1;576;640;64;64
+		blocks;1;640;640;64;64
+		bluetooth-connected;1;704;640;64;64
+		bluetooth-off;1;768;640;64;64
+		bluetooth-searching;1;832;640;64;64
+		bluetooth;1;896;640;64;64
+		bold;1;960;640;64;64
+		bolt;1;0;704;64;64
+		bomb;1;64;704;64;64
+		bone;1;128;704;64;64
+		book-a;1;192;704;64;64
+		book-audio;1;256;704;64;64
+		book-check;1;320;704;64;64
+		book-copy;1;384;704;64;64
+		book-dashed;1;448;704;64;64
+		book-down;1;512;704;64;64
+		book-headphones;1;576;704;64;64
+		book-heart;1;640;704;64;64
+		book-image;1;704;704;64;64
+		book-key;1;768;704;64;64
+		book-lock;1;832;704;64;64
+		book-marked;1;896;704;64;64
+		book-minus;1;960;704;64;64
+		book-open-check;1;0;768;64;64
+		book-open-text;1;64;768;64;64
+		book-open;1;128;768;64;64
+		book-plus;1;192;768;64;64
+		book-text;1;256;768;64;64
+		book-type;1;320;768;64;64
+		book-up-2;1;384;768;64;64
+		book-up;1;448;768;64;64
+		book-user;1;512;768;64;64
+		book-x;1;576;768;64;64
+		book;1;640;768;64;64
+		bookmark-check;1;704;768;64;64
+		bookmark-minus;1;768;768;64;64
+		bookmark-plus;1;832;768;64;64
+		bookmark-x;1;896;768;64;64
+		bookmark;1;960;768;64;64
+		boom-box;1;0;832;64;64
+		bot-message-square;1;64;832;64;64
+		bot-off;1;128;832;64;64
+		bot;1;192;832;64;64
+		box;1;256;832;64;64
+		boxes;1;320;832;64;64
+		braces;1;384;832;64;64
+		brackets;1;448;832;64;64
+		brain-circuit;1;512;832;64;64
+		brain-cog;1;576;832;64;64
+		brain;1;640;832;64;64
+		brick-wall;1;704;832;64;64
+		briefcase-business;1;768;832;64;64
+		briefcase-conveyor-belt;1;832;832;64;64
+		briefcase-medical;1;896;832;64;64
+		briefcase;1;960;832;64;64
+		bring-to-front;1;0;896;64;64
+		brush;1;64;896;64;64
+		bug-off;1;128;896;64;64
+		bug-play;1;192;896;64;64
+		bug;1;256;896;64;64
+		building-2;1;320;896;64;64
+		building;1;384;896;64;64
+		bus-front;1;448;896;64;64
+		bus;1;512;896;64;64
+		cable-car;1;576;896;64;64
+		cable;1;640;896;64;64
+		cake-slice;1;704;896;64;64
+		cake;1;768;896;64;64
+		calculator;1;832;896;64;64
+		calendar-1;1;896;896;64;64
+		calendar-arrow-down;1;960;896;64;64
+		calendar-arrow-up;1;0;960;64;64
+		calendar-check-2;1;64;960;64;64
+		calendar-check;1;128;960;64;64
+		calendar-clock;1;192;960;64;64
+		calendar-cog;1;256;960;64;64
+		calendar-days;1;320;960;64;64
+		calendar-fold;1;384;960;64;64
+		calendar-heart;1;448;960;64;64
+		calendar-minus-2;1;512;960;64;64
+		calendar-minus;1;576;960;64;64
+		calendar-off;1;640;960;64;64
+		calendar-plus-2;1;704;960;64;64
+		calendar-plus;1;768;960;64;64
+		calendar-range;1;832;960;64;64
+		calendar-search;1;896;960;64;64
+		calendar-sync;1;960;960;64;64
+		calendar-x-2;2;0;0;64;64
+		calendar-x;2;64;0;64;64
+		calendar;2;128;0;64;64
+		camera-off;2;192;0;64;64
+		camera;2;256;0;64;64
+		candy-cane;2;320;0;64;64
+		candy-off;2;384;0;64;64
+		candy;2;448;0;64;64
+		cannabis;2;512;0;64;64
+		captions-off;2;576;0;64;64
+		captions;2;640;0;64;64
+		car-front;2;704;0;64;64
+		car-taxi-front;2;768;0;64;64
+		car;2;832;0;64;64
+		caravan;2;896;0;64;64
+		carrot;2;960;0;64;64
+		case-lower;2;0;64;64;64
+		case-sensitive;2;64;64;64;64
+		case-upper;2;128;64;64;64
+		cassette-tape;2;192;64;64;64
+		cast;2;256;64;64;64
+		castle;2;320;64;64;64
+		cat;2;384;64;64;64
+		cctv;2;448;64;64;64
+		chart-area;2;512;64;64;64
+		chart-bar-big;2;576;64;64;64
+		chart-bar-decreasing;2;640;64;64;64
+		chart-bar-increasing;2;704;64;64;64
+		chart-bar-stacked;2;768;64;64;64
+		chart-bar;2;832;64;64;64
+		chart-candlestick;2;896;64;64;64
+		chart-column-big;2;960;64;64;64
+		chart-column-decreasing;2;0;128;64;64
+		chart-column-increasing;2;64;128;64;64
+		chart-column-stacked;2;128;128;64;64
+		chart-column;2;192;128;64;64
+		chart-gantt;2;256;128;64;64
+		chart-line;2;320;128;64;64
+		chart-network;2;384;128;64;64
+		chart-no-axes-column-decreasing;2;448;128;64;64
+		chart-no-axes-column-increasing;2;512;128;64;64
+		chart-no-axes-column;2;576;128;64;64
+		chart-no-axes-combined;2;640;128;64;64
+		chart-no-axes-gantt;2;704;128;64;64
+		chart-pie;2;768;128;64;64
+		chart-scatter;2;832;128;64;64
+		chart-spline;2;896;128;64;64
+		check-check;2;960;128;64;64
+		check;2;0;192;64;64
+		chef-hat;2;64;192;64;64
+		cherry;2;128;192;64;64
+		chevron-down;2;192;192;64;64
+		chevron-first;2;256;192;64;64
+		chevron-last;2;320;192;64;64
+		chevron-left;2;384;192;64;64
+		chevron-right;2;448;192;64;64
+		chevron-up;2;512;192;64;64
+		chevrons-down-up;2;576;192;64;64
+		chevrons-down;2;640;192;64;64
+		chevrons-left-right-ellipsis;2;704;192;64;64
+		chevrons-left-right;2;768;192;64;64
+		chevrons-left;2;832;192;64;64
+		chevrons-right-left;2;896;192;64;64
+		chevrons-right;2;960;192;64;64
+		chevrons-up-down;2;0;256;64;64
+		chevrons-up;2;64;256;64;64
+		chrome;2;128;256;64;64
+		church;2;192;256;64;64
+		cigarette-off;2;256;256;64;64
+		cigarette;2;320;256;64;64
+		circle-alert;2;384;256;64;64
+		circle-arrow-down;2;448;256;64;64
+		circle-arrow-left;2;512;256;64;64
+		circle-arrow-out-down-left;2;576;256;64;64
+		circle-arrow-out-down-right;2;640;256;64;64
+		circle-arrow-out-up-left;2;704;256;64;64
+		circle-arrow-out-up-right;2;768;256;64;64
+		circle-arrow-right;2;832;256;64;64
+		circle-arrow-up;2;896;256;64;64
+		circle-check-big;2;960;256;64;64
+		circle-check;2;0;320;64;64
+		circle-chevron-down;2;64;320;64;64
+		circle-chevron-left;2;128;320;64;64
+		circle-chevron-right;2;192;320;64;64
+		circle-chevron-up;2;256;320;64;64
+		circle-dashed;2;320;320;64;64
+		circle-divide;2;384;320;64;64
+		circle-dollar-sign;2;448;320;64;64
+		circle-dot-dashed;2;512;320;64;64
+		circle-dot;2;576;320;64;64
+		circle-ellipsis;2;640;320;64;64
+		circle-equal;2;704;320;64;64
+		circle-fading-arrow-up;2;768;320;64;64
+		circle-fading-plus;2;832;320;64;64
+		circle-gauge;2;896;320;64;64
+		circle-help;2;960;320;64;64
+		circle-minus;2;0;384;64;64
+		circle-off;2;64;384;64;64
+		circle-parking-off;2;128;384;64;64
+		circle-parking;2;192;384;64;64
+		circle-pause;2;256;384;64;64
+		circle-percent;2;320;384;64;64
+		circle-play;2;384;384;64;64
+		circle-plus;2;448;384;64;64
+		circle-power;2;512;384;64;64
+		circle-slash-2;2;576;384;64;64
+		circle-slash;2;640;384;64;64
+		circle-stop;2;704;384;64;64
+		circle-user-round;2;768;384;64;64
+		circle-user;2;832;384;64;64
+		circle-x;2;896;384;64;64
+		circle;2;960;384;64;64
+		circuit-board;2;0;448;64;64
+		citrus;2;64;448;64;64
+		clapperboard;2;128;448;64;64
+		clipboard-check;2;192;448;64;64
+		clipboard-copy;2;256;448;64;64
+		clipboard-list;2;320;448;64;64
+		clipboard-minus;2;384;448;64;64
+		clipboard-paste;2;448;448;64;64
+		clipboard-pen-line;2;512;448;64;64
+		clipboard-pen;2;576;448;64;64
+		clipboard-plus;2;640;448;64;64
+		clipboard-type;2;704;448;64;64
+		clipboard-x;2;768;448;64;64
+		clipboard;2;832;448;64;64
+		clock-1;2;896;448;64;64
+		clock-10;2;960;448;64;64
+		clock-11;2;0;512;64;64
+		clock-12;2;64;512;64;64
+		clock-2;2;128;512;64;64
+		clock-3;2;192;512;64;64
+		clock-4;2;256;512;64;64
+		clock-5;2;320;512;64;64
+		clock-6;2;384;512;64;64
+		clock-7;2;448;512;64;64
+		clock-8;2;512;512;64;64
+		clock-9;2;576;512;64;64
+		clock-alert;2;640;512;64;64
+		clock-arrow-down;2;704;512;64;64
+		clock-arrow-up;2;768;512;64;64
+		clock;2;832;512;64;64
+		cloud-alert;2;896;512;64;64
+		cloud-cog;2;960;512;64;64
+		cloud-download;2;0;576;64;64
+		cloud-drizzle;2;64;576;64;64
+		cloud-fog;2;128;576;64;64
+		cloud-hail;2;192;576;64;64
+		cloud-lightning;2;256;576;64;64
+		cloud-moon-rain;2;320;576;64;64
+		cloud-moon;2;384;576;64;64
+		cloud-off;2;448;576;64;64
+		cloud-rain-wind;2;512;576;64;64
+		cloud-rain;2;576;576;64;64
+		cloud-snow;2;640;576;64;64
+		cloud-sun-rain;2;704;576;64;64
+		cloud-sun;2;768;576;64;64
+		cloud-upload;2;832;576;64;64
+		cloud;2;896;576;64;64
+		cloudy;2;960;576;64;64
+		clover;2;0;640;64;64
+		club;2;64;640;64;64
+		code-xml;2;128;640;64;64
+		code;2;192;640;64;64
+		codepen;2;256;640;64;64
+		codesandbox;2;320;640;64;64
+		coffee;2;384;640;64;64
+		cog;2;448;640;64;64
+		coins;2;512;640;64;64
+		columns-2;2;576;640;64;64
+		columns-3;2;640;640;64;64
+		columns-4;2;704;640;64;64
+		combine;2;768;640;64;64
+		command;2;832;640;64;64
+		compass;2;896;640;64;64
+		component;2;960;640;64;64
+		computer;2;0;704;64;64
+		concierge-bell;2;64;704;64;64
+		cone;2;128;704;64;64
+		construction;2;192;704;64;64
+		contact-round;2;256;704;64;64
+		contact;2;320;704;64;64
+		container;2;384;704;64;64
+		contrast;2;448;704;64;64
+		cookie;2;512;704;64;64
+		cooking-pot;2;576;704;64;64
+		copy-check;2;640;704;64;64
+		copy-minus;2;704;704;64;64
+		copy-plus;2;768;704;64;64
+		copy-slash;2;832;704;64;64
+		copy-x;2;896;704;64;64
+		copy;2;960;704;64;64
+		copyleft;2;0;768;64;64
+		copyright;2;64;768;64;64
+		corner-down-left;2;128;768;64;64
+		corner-down-right;2;192;768;64;64
+		corner-left-down;2;256;768;64;64
+		corner-left-up;2;320;768;64;64
+		corner-right-down;2;384;768;64;64
+		corner-right-up;2;448;768;64;64
+		corner-up-left;2;512;768;64;64
+		corner-up-right;2;576;768;64;64
+		cpu;2;640;768;64;64
+		creative-commons;2;704;768;64;64
+		credit-card;2;768;768;64;64
+		croissant;2;832;768;64;64
+		crop;2;896;768;64;64
+		cross;2;960;768;64;64
+		crosshair;2;0;832;64;64
+		crown;2;64;832;64;64
+		cuboid;2;128;832;64;64
+		cup-soda;2;192;832;64;64
+		currency;2;256;832;64;64
+		cylinder;2;320;832;64;64
+		dam;2;384;832;64;64
+		database-backup;2;448;832;64;64
+		database-zap;2;512;832;64;64
+		database;2;576;832;64;64
+		delete;2;640;832;64;64
+		dessert;2;704;832;64;64
+		diameter;2;768;832;64;64
+		diamond-minus;2;832;832;64;64
+		diamond-percent;2;896;832;64;64
+		diamond-plus;2;960;832;64;64
+		diamond;2;0;896;64;64
+		dice-1;2;64;896;64;64
+		dice-2;2;128;896;64;64
+		dice-3;2;192;896;64;64
+		dice-4;2;256;896;64;64
+		dice-5;2;320;896;64;64
+		dice-6;2;384;896;64;64
+		dices;2;448;896;64;64
+		diff;2;512;896;64;64
+		disc-2;2;576;896;64;64
+		disc-3;2;640;896;64;64
+		disc-album;2;704;896;64;64
+		disc;2;768;896;64;64
+		divide;2;832;896;64;64
+		dna-off;2;896;896;64;64
+		dna;2;960;896;64;64
+		dock;2;0;960;64;64
+		dog;2;64;960;64;64
+		dollar-sign;2;128;960;64;64
+		donut;2;192;960;64;64
+		door-closed;2;256;960;64;64
+		door-open;2;320;960;64;64
+		dot;2;384;960;64;64
+		download;2;448;960;64;64
+		drafting-compass;2;512;960;64;64
+		drama;2;576;960;64;64
+		dribbble;2;640;960;64;64
+		drill;2;704;960;64;64
+		droplet-off;2;768;960;64;64
+		droplet;2;832;960;64;64
+		droplets;2;896;960;64;64
+		drum;2;960;960;64;64
+		drumstick;3;0;0;64;64
+		dumbbell;3;64;0;64;64
+		ear-off;3;128;0;64;64
+		ear;3;192;0;64;64
+		earth-lock;3;256;0;64;64
+		earth;3;320;0;64;64
+		eclipse;3;384;0;64;64
+		egg-fried;3;448;0;64;64
+		egg-off;3;512;0;64;64
+		egg;3;576;0;64;64
+		ellipsis-vertical;3;640;0;64;64
+		ellipsis;3;704;0;64;64
+		equal-approximately;3;768;0;64;64
+		equal-not;3;832;0;64;64
+		equal;3;896;0;64;64
+		eraser;3;960;0;64;64
+		ethernet-port;3;0;64;64;64
+		euro;3;64;64;64;64
+		expand;3;128;64;64;64
+		external-link;3;192;64;64;64
+		eye-closed;3;256;64;64;64
+		eye-off;3;320;64;64;64
+		eye;3;384;64;64;64
+		facebook;3;448;64;64;64
+		factory;3;512;64;64;64
+		fan;3;576;64;64;64
+		fast-forward;3;640;64;64;64
+		feather;3;704;64;64;64
+		fence;3;768;64;64;64
+		ferris-wheel;3;832;64;64;64
+		figma;3;896;64;64;64
+		file-archive;3;960;64;64;64
+		file-audio-2;3;0;128;64;64
+		file-audio;3;64;128;64;64
+		file-axis-3d;3;128;128;64;64
+		file-badge-2;3;192;128;64;64
+		file-badge;3;256;128;64;64
+		file-box;3;320;128;64;64
+		file-chart-column-increasing;3;384;128;64;64
+		file-chart-column;3;448;128;64;64
+		file-chart-line;3;512;128;64;64
+		file-chart-pie;3;576;128;64;64
+		file-check-2;3;640;128;64;64
+		file-check;3;704;128;64;64
+		file-clock;3;768;128;64;64
+		file-code-2;3;832;128;64;64
+		file-code;3;896;128;64;64
+		file-cog;3;960;128;64;64
+		file-diff;3;0;192;64;64
+		file-digit;3;64;192;64;64
+		file-down;3;128;192;64;64
+		file-heart;3;192;192;64;64
+		file-image;3;256;192;64;64
+		file-input;3;320;192;64;64
+		file-json-2;3;384;192;64;64
+		file-json;3;448;192;64;64
+		file-key-2;3;512;192;64;64
+		file-key;3;576;192;64;64
+		file-lock-2;3;640;192;64;64
+		file-lock;3;704;192;64;64
+		file-minus-2;3;768;192;64;64
+		file-minus;3;832;192;64;64
+		file-music;3;896;192;64;64
+		file-output;3;960;192;64;64
+		file-pen-line;3;0;256;64;64
+		file-pen;3;64;256;64;64
+		file-plus-2;3;128;256;64;64
+		file-plus;3;192;256;64;64
+		file-question;3;256;256;64;64
+		file-scan;3;320;256;64;64
+		file-search-2;3;384;256;64;64
+		file-search;3;448;256;64;64
+		file-sliders;3;512;256;64;64
+		file-spreadsheet;3;576;256;64;64
+		file-stack;3;640;256;64;64
+		file-symlink;3;704;256;64;64
+		file-terminal;3;768;256;64;64
+		file-text;3;832;256;64;64
+		file-type-2;3;896;256;64;64
+		file-type;3;960;256;64;64
+		file-up;3;0;320;64;64
+		file-user;3;64;320;64;64
+		file-video-2;3;128;320;64;64
+		file-video;3;192;320;64;64
+		file-volume-2;3;256;320;64;64
+		file-volume;3;320;320;64;64
+		file-warning;3;384;320;64;64
+		file-x-2;3;448;320;64;64
+		file-x;3;512;320;64;64
+		file;3;576;320;64;64
+		files;3;640;320;64;64
+		film;3;704;320;64;64
+		filter-x;3;768;320;64;64
+		filter;3;832;320;64;64
+		fingerprint;3;896;320;64;64
+		fire-extinguisher;3;960;320;64;64
+		fish-off;3;0;384;64;64
+		fish-symbol;3;64;384;64;64
+		fish;3;128;384;64;64
+		flag-off;3;192;384;64;64
+		flag-triangle-left;3;256;384;64;64
+		flag-triangle-right;3;320;384;64;64
+		flag;3;384;384;64;64
+		flame-kindling;3;448;384;64;64
+		flame;3;512;384;64;64
+		flashlight-off;3;576;384;64;64
+		flashlight;3;640;384;64;64
+		flask-conical-off;3;704;384;64;64
+		flask-conical;3;768;384;64;64
+		flask-round;3;832;384;64;64
+		flip-horizontal-2;3;896;384;64;64
+		flip-horizontal;3;960;384;64;64
+		flip-vertical-2;3;0;448;64;64
+		flip-vertical;3;64;448;64;64
+		flower-2;3;128;448;64;64
+		flower;3;192;448;64;64
+		focus;3;256;448;64;64
+		fold-horizontal;3;320;448;64;64
+		fold-vertical;3;384;448;64;64
+		folder-archive;3;448;448;64;64
+		folder-check;3;512;448;64;64
+		folder-clock;3;576;448;64;64
+		folder-closed;3;640;448;64;64
+		folder-code;3;704;448;64;64
+		folder-cog;3;768;448;64;64
+		folder-dot;3;832;448;64;64
+		folder-down;3;896;448;64;64
+		folder-git-2;3;960;448;64;64
+		folder-git;3;0;512;64;64
+		folder-heart;3;64;512;64;64
+		folder-input;3;128;512;64;64
+		folder-kanban;3;192;512;64;64
+		folder-key;3;256;512;64;64
+		folder-lock;3;320;512;64;64
+		folder-minus;3;384;512;64;64
+		folder-open-dot;3;448;512;64;64
+		folder-open;3;512;512;64;64
+		folder-output;3;576;512;64;64
+		folder-pen;3;640;512;64;64
+		folder-plus;3;704;512;64;64
+		folder-root;3;768;512;64;64
+		folder-search-2;3;832;512;64;64
+		folder-search;3;896;512;64;64
+		folder-symlink;3;960;512;64;64
+		folder-sync;3;0;576;64;64
+		folder-tree;3;64;576;64;64
+		folder-up;3;128;576;64;64
+		folder-x;3;192;576;64;64
+		folder;3;256;576;64;64
+		folders;3;320;576;64;64
+		footprints;3;384;576;64;64
+		forklift;3;448;576;64;64
+		forward;3;512;576;64;64
+		frame;3;576;576;64;64
+		framer;3;640;576;64;64
+		frown;3;704;576;64;64
+		fuel;3;768;576;64;64
+		fullscreen;3;832;576;64;64
+		gallery-horizontal-end;3;896;576;64;64
+		gallery-horizontal;3;960;576;64;64
+		gallery-thumbnails;3;0;640;64;64
+		gallery-vertical-end;3;64;640;64;64
+		gallery-vertical;3;128;640;64;64
+		gamepad-2;3;192;640;64;64
+		gamepad;3;256;640;64;64
+		gauge;3;320;640;64;64
+		gavel;3;384;640;64;64
+		gem;3;448;640;64;64
+		ghost;3;512;640;64;64
+		gift;3;576;640;64;64
+		git-branch-plus;3;640;640;64;64
+		git-branch;3;704;640;64;64
+		git-commit-horizontal;3;768;640;64;64
+		git-commit-vertical;3;832;640;64;64
+		git-compare-arrows;3;896;640;64;64
+		git-compare;3;960;640;64;64
+		git-fork;3;0;704;64;64
+		git-graph;3;64;704;64;64
+		git-merge;3;128;704;64;64
+		git-pull-request-arrow;3;192;704;64;64
+		git-pull-request-closed;3;256;704;64;64
+		git-pull-request-create-arrow;3;320;704;64;64
+		git-pull-request-create;3;384;704;64;64
+		git-pull-request-draft;3;448;704;64;64
+		git-pull-request;3;512;704;64;64
+		github;3;576;704;64;64
+		gitlab;3;640;704;64;64
+		glass-water;3;704;704;64;64
+		glasses;3;768;704;64;64
+		globe-lock;3;832;704;64;64
+		globe;3;896;704;64;64
+		goal;3;960;704;64;64
+		grab;3;0;768;64;64
+		graduation-cap;3;64;768;64;64
+		grape;3;128;768;64;64
+		grid-2x2-check;3;192;768;64;64
+		grid-2x2-plus;3;256;768;64;64
+		grid-2x2-x;3;320;768;64;64
+		grid-2x2;3;384;768;64;64
+		grid-3x3;3;448;768;64;64
+		grip-horizontal;3;512;768;64;64
+		grip-vertical;3;576;768;64;64
+		grip;3;640;768;64;64
+		group;3;704;768;64;64
+		guitar;3;768;768;64;64
+		ham;3;832;768;64;64
+		hammer;3;896;768;64;64
+		hand-coins;3;960;768;64;64
+		hand-heart;3;0;832;64;64
+		hand-helping;3;64;832;64;64
+		hand-metal;3;128;832;64;64
+		hand-platter;3;192;832;64;64
+		hand;3;256;832;64;64
+		handshake;3;320;832;64;64
+		hard-drive-download;3;384;832;64;64
+		hard-drive-upload;3;448;832;64;64
+		hard-drive;3;512;832;64;64
+		hard-hat;3;576;832;64;64
+		hash;3;640;832;64;64
+		haze;3;704;832;64;64
+		hdmi-port;3;768;832;64;64
+		heading-1;3;832;832;64;64
+		heading-2;3;896;832;64;64
+		heading-3;3;960;832;64;64
+		heading-4;3;0;896;64;64
+		heading-5;3;64;896;64;64
+		heading-6;3;128;896;64;64
+		heading;3;192;896;64;64
+		headphone-off;3;256;896;64;64
+		headphones;3;320;896;64;64
+		headset;3;384;896;64;64
+		heart-crack;3;448;896;64;64
+		heart-handshake;3;512;896;64;64
+		heart-off;3;576;896;64;64
+		heart-pulse;3;640;896;64;64
+		heart;3;704;896;64;64
+		heater;3;768;896;64;64
+		hexagon;3;832;896;64;64
+		highlighter;3;896;896;64;64
+		history;3;960;896;64;64
+		hop-off;3;0;960;64;64
+		hop;3;64;960;64;64
+		hospital;3;128;960;64;64
+		hotel;3;192;960;64;64
+		hourglass;3;256;960;64;64
+		house-plug;3;320;960;64;64
+		house-plus;3;384;960;64;64
+		house;3;448;960;64;64
+		ice-cream-bowl;3;512;960;64;64
+		ice-cream-cone;3;576;960;64;64
+		id-card;3;640;960;64;64
+		image-down;3;704;960;64;64
+		image-minus;3;768;960;64;64
+		image-off;3;832;960;64;64
+		image-play;3;896;960;64;64
+		image-plus;3;960;960;64;64
+		image-up;4;0;0;64;64
+		image-upscale;4;64;0;64;64
+		image;4;128;0;64;64
+		images;4;192;0;64;64
+		import;4;256;0;64;64
+		inbox;4;320;0;64;64
+		indent-decrease;4;384;0;64;64
+		indent-increase;4;448;0;64;64
+		indian-rupee;4;512;0;64;64
+		infinity;4;576;0;64;64
+		info;4;640;0;64;64
+		inspection-panel;4;704;0;64;64
+		instagram;4;768;0;64;64
+		italic;4;832;0;64;64
+		iteration-ccw;4;896;0;64;64
+		iteration-cw;4;960;0;64;64
+		japanese-yen;4;0;64;64;64
+		joystick;4;64;64;64;64
+		kanban;4;128;64;64;64
+		key-round;4;192;64;64;64
+		key-square;4;256;64;64;64
+		key;4;320;64;64;64
+		keyboard-music;4;384;64;64;64
+		keyboard-off;4;448;64;64;64
+		keyboard;4;512;64;64;64
+		lamp-ceiling;4;576;64;64;64
+		lamp-desk;4;640;64;64;64
+		lamp-floor;4;704;64;64;64
+		lamp-wall-down;4;768;64;64;64
+		lamp-wall-up;4;832;64;64;64
+		lamp;4;896;64;64;64
+		land-plot;4;960;64;64;64
+		landmark;4;0;128;64;64
+		languages;4;64;128;64;64
+		laptop-minimal-check;4;128;128;64;64
+		laptop-minimal;4;192;128;64;64
+		laptop;4;256;128;64;64
+		lasso-select;4;320;128;64;64
+		lasso;4;384;128;64;64
+		laugh;4;448;128;64;64
+		layers-2;4;512;128;64;64
+		layers;4;576;128;64;64
+		layout-dashboard;4;640;128;64;64
+		layout-grid;4;704;128;64;64
+		layout-list;4;768;128;64;64
+		layout-panel-left;4;832;128;64;64
+		layout-panel-top;4;896;128;64;64
+		layout-template;4;960;128;64;64
+		leaf;4;0;192;64;64
+		leafy-green;4;64;192;64;64
+		lectern;4;128;192;64;64
+		letter-text;4;192;192;64;64
+		library-big;4;256;192;64;64
+		library;4;320;192;64;64
+		life-buoy;4;384;192;64;64
+		ligature;4;448;192;64;64
+		lightbulb-off;4;512;192;64;64
+		lightbulb;4;576;192;64;64
+		link-2-off;4;640;192;64;64
+		link-2;4;704;192;64;64
+		link;4;768;192;64;64
+		linkedin;4;832;192;64;64
+		list-check;4;896;192;64;64
+		list-checks;4;960;192;64;64
+		list-collapse;4;0;256;64;64
+		list-end;4;64;256;64;64
+		list-filter-plus;4;128;256;64;64
+		list-filter;4;192;256;64;64
+		list-minus;4;256;256;64;64
+		list-music;4;320;256;64;64
+		list-ordered;4;384;256;64;64
+		list-plus;4;448;256;64;64
+		list-restart;4;512;256;64;64
+		list-start;4;576;256;64;64
+		list-todo;4;640;256;64;64
+		list-tree;4;704;256;64;64
+		list-video;4;768;256;64;64
+		list-x;4;832;256;64;64
+		list;4;896;256;64;64
+		loader-circle;4;960;256;64;64
+		loader-pinwheel;4;0;320;64;64
+		loader;4;64;320;64;64
+		locate-fixed;4;128;320;64;64
+		locate-off;4;192;320;64;64
+		locate;4;256;320;64;64
+		lock-keyhole-open;4;320;320;64;64
+		lock-keyhole;4;384;320;64;64
+		lock-open;4;448;320;64;64
+		lock;4;512;320;64;64
+		log-in;4;576;320;64;64
+		log-out;4;640;320;64;64
+		logs;4;704;320;64;64
+		lollipop;4;768;320;64;64
+		luggage;4;832;320;64;64
+		magnet;4;896;320;64;64
+		mail-check;4;960;320;64;64
+		mail-minus;4;0;384;64;64
+		mail-open;4;64;384;64;64
+		mail-plus;4;128;384;64;64
+		mail-question;4;192;384;64;64
+		mail-search;4;256;384;64;64
+		mail-warning;4;320;384;64;64
+		mail-x;4;384;384;64;64
+		mail;4;448;384;64;64
+		mailbox;4;512;384;64;64
+		mails;4;576;384;64;64
+		map-pin-check-inside;4;640;384;64;64
+		map-pin-check;4;704;384;64;64
+		map-pin-house;4;768;384;64;64
+		map-pin-minus-inside;4;832;384;64;64
+		map-pin-minus;4;896;384;64;64
+		map-pin-off;4;960;384;64;64
+		map-pin-plus-inside;4;0;448;64;64
+		map-pin-plus;4;64;448;64;64
+		map-pin-x-inside;4;128;448;64;64
+		map-pin-x;4;192;448;64;64
+		map-pin;4;256;448;64;64
+		map-pinned;4;320;448;64;64
+		map;4;384;448;64;64
+		martini;4;448;448;64;64
+		maximize-2;4;512;448;64;64
+		maximize;4;576;448;64;64
+		medal;4;640;448;64;64
+		megaphone-off;4;704;448;64;64
+		megaphone;4;768;448;64;64
+		meh;4;832;448;64;64
+		memory-stick;4;896;448;64;64
+		menu;4;960;448;64;64
+		merge;4;0;512;64;64
+		message-circle-code;4;64;512;64;64
+		message-circle-dashed;4;128;512;64;64
+		message-circle-heart;4;192;512;64;64
+		message-circle-more;4;256;512;64;64
+		message-circle-off;4;320;512;64;64
+		message-circle-plus;4;384;512;64;64
+		message-circle-question;4;448;512;64;64
+		message-circle-reply;4;512;512;64;64
+		message-circle-warning;4;576;512;64;64
+		message-circle-x;4;640;512;64;64
+		message-circle;4;704;512;64;64
+		message-square-code;4;768;512;64;64
+		message-square-dashed;4;832;512;64;64
+		message-square-diff;4;896;512;64;64
+		message-square-dot;4;960;512;64;64
+		message-square-heart;4;0;576;64;64
+		message-square-lock;4;64;576;64;64
+		message-square-more;4;128;576;64;64
+		message-square-off;4;192;576;64;64
+		message-square-plus;4;256;576;64;64
+		message-square-quote;4;320;576;64;64
+		message-square-reply;4;384;576;64;64
+		message-square-share;4;448;576;64;64
+		message-square-text;4;512;576;64;64
+		message-square-warning;4;576;576;64;64
+		message-square-x;4;640;576;64;64
+		message-square;4;704;576;64;64
+		messages-square;4;768;576;64;64
+		mic-off;4;832;576;64;64
+		mic-vocal;4;896;576;64;64
+		mic;4;960;576;64;64
+		microchip;4;0;640;64;64
+		microscope;4;64;640;64;64
+		microwave;4;128;640;64;64
+		milestone;4;192;640;64;64
+		milk-off;4;256;640;64;64
+		milk;4;320;640;64;64
+		minimize-2;4;384;640;64;64
+		minimize;4;448;640;64;64
+		minus;4;512;640;64;64
+		monitor-check;4;576;640;64;64
+		monitor-cog;4;640;640;64;64
+		monitor-dot;4;704;640;64;64
+		monitor-down;4;768;640;64;64
+		monitor-off;4;832;640;64;64
+		monitor-pause;4;896;640;64;64
+		monitor-play;4;960;640;64;64
+		monitor-smartphone;4;0;704;64;64
+		monitor-speaker;4;64;704;64;64
+		monitor-stop;4;128;704;64;64
+		monitor-up;4;192;704;64;64
+		monitor-x;4;256;704;64;64
+		monitor;4;320;704;64;64
+		moon-star;4;384;704;64;64
+		moon;4;448;704;64;64
+		mountain-snow;4;512;704;64;64
+		mountain;4;576;704;64;64
+		mouse-off;4;640;704;64;64
+		mouse-pointer-2;4;704;704;64;64
+		mouse-pointer-ban;4;768;704;64;64
+		mouse-pointer-click;4;832;704;64;64
+		mouse-pointer;4;896;704;64;64
+		mouse;4;960;704;64;64
+		move-3d;4;0;768;64;64
+		move-diagonal-2;4;64;768;64;64
+		move-diagonal;4;128;768;64;64
+		move-down-left;4;192;768;64;64
+		move-down-right;4;256;768;64;64
+		move-down;4;320;768;64;64
+		move-horizontal;4;384;768;64;64
+		move-left;4;448;768;64;64
+		move-right;4;512;768;64;64
+		move-up-left;4;576;768;64;64
+		move-up-right;4;640;768;64;64
+		move-up;4;704;768;64;64
+		move-vertical;4;768;768;64;64
+		move;4;832;768;64;64
+		music-2;4;896;768;64;64
+		music-3;4;960;768;64;64
+		music-4;4;0;832;64;64
+		music;4;64;832;64;64
+		navigation-2-off;4;128;832;64;64
+		navigation-2;4;192;832;64;64
+		navigation-off;4;256;832;64;64
+		navigation;4;320;832;64;64
+		network;4;384;832;64;64
+		newspaper;4;448;832;64;64
+		nfc;4;512;832;64;64
+		notebook-pen;4;576;832;64;64
+		notebook-tabs;4;640;832;64;64
+		notebook-text;4;704;832;64;64
+		notebook;4;768;832;64;64
+		notepad-text-dashed;4;832;832;64;64
+		notepad-text;4;896;832;64;64
+		nut-off;4;960;832;64;64
+		nut;4;0;896;64;64
+		octagon-alert;4;64;896;64;64
+		octagon-minus;4;128;896;64;64
+		octagon-pause;4;192;896;64;64
+		octagon-x;4;256;896;64;64
+		octagon;4;320;896;64;64
+		omega;4;384;896;64;64
+		option;4;448;896;64;64
+		orbit;4;512;896;64;64
+		origami;4;576;896;64;64
+		package-2;4;640;896;64;64
+		package-check;4;704;896;64;64
+		package-minus;4;768;896;64;64
+		package-open;4;832;896;64;64
+		package-plus;4;896;896;64;64
+		package-search;4;960;896;64;64
+		package-x;4;0;960;64;64
+		package;4;64;960;64;64
+		paint-bucket;4;128;960;64;64
+		paint-roller;4;192;960;64;64
+		paintbrush-vertical;4;256;960;64;64
+		paintbrush;4;320;960;64;64
+		palette;4;384;960;64;64
+		panel-bottom-close;4;448;960;64;64
+		panel-bottom-dashed;4;512;960;64;64
+		panel-bottom-open;4;576;960;64;64
+		panel-bottom;4;640;960;64;64
+		panel-left-close;4;704;960;64;64
+		panel-left-dashed;4;768;960;64;64
+		panel-left-open;4;832;960;64;64
+		panel-left;4;896;960;64;64
+		panel-right-close;4;960;960;64;64
+		panel-right-dashed;5;0;0;64;64
+		panel-right-open;5;64;0;64;64
+		panel-right;5;128;0;64;64
+		panel-top-close;5;192;0;64;64
+		panel-top-dashed;5;256;0;64;64
+		panel-top-open;5;320;0;64;64
+		panel-top;5;384;0;64;64
+		panels-left-bottom;5;448;0;64;64
+		panels-right-bottom;5;512;0;64;64
+		panels-top-left;5;576;0;64;64
+		paperclip;5;640;0;64;64
+		parentheses;5;704;0;64;64
+		parking-meter;5;768;0;64;64
+		party-popper;5;832;0;64;64
+		pause;5;896;0;64;64
+		paw-print;5;960;0;64;64
+		pc-case;5;0;64;64;64
+		pen-line;5;64;64;64;64
+		pen-off;5;128;64;64;64
+		pen-tool;5;192;64;64;64
+		pen;5;256;64;64;64
+		pencil-line;5;320;64;64;64
+		pencil-off;5;384;64;64;64
+		pencil-ruler;5;448;64;64;64
+		pencil;5;512;64;64;64
+		pentagon;5;576;64;64;64
+		percent;5;640;64;64;64
+		person-standing;5;704;64;64;64
+		philippine-peso;5;768;64;64;64
+		phone-call;5;832;64;64;64
+		phone-forwarded;5;896;64;64;64
+		phone-incoming;5;960;64;64;64
+		phone-missed;5;0;128;64;64
+		phone-off;5;64;128;64;64
+		phone-outgoing;5;128;128;64;64
+		phone;5;192;128;64;64
+		phosphor-acorn-bold;5;256;128;64;64
+		phosphor-acorn-duotone;5;320;128;64;64
+		phosphor-acorn-fill;5;384;128;64;64
+		phosphor-acorn-light;5;448;128;64;64
+		phosphor-acorn-thin;5;512;128;64;64
+		phosphor-acorn;5;576;128;64;64
+		phosphor-address-book-bold;5;640;128;64;64
+		phosphor-address-book-duotone;5;704;128;64;64
+		phosphor-address-book-fill;5;768;128;64;64
+		phosphor-address-book-light;5;832;128;64;64
+		phosphor-address-book-tabs-bold;5;896;128;64;64
+		phosphor-address-book-tabs-duotone;5;960;128;64;64
+		phosphor-address-book-tabs-fill;5;0;192;64;64
+		phosphor-address-book-tabs-light;5;64;192;64;64
+		phosphor-address-book-tabs-thin;5;128;192;64;64
+		phosphor-address-book-tabs;5;192;192;64;64
+		phosphor-address-book-thin;5;256;192;64;64
+		phosphor-address-book;5;320;192;64;64
+		phosphor-air-traffic-control-bold;5;384;192;64;64
+		phosphor-air-traffic-control-duotone;5;448;192;64;64
+		phosphor-air-traffic-control-fill;5;512;192;64;64
+		phosphor-air-traffic-control-light;5;576;192;64;64
+		phosphor-air-traffic-control-thin;5;640;192;64;64
+		phosphor-air-traffic-control;5;704;192;64;64
+		phosphor-airplane-bold;5;768;192;64;64
+		phosphor-airplane-duotone;5;832;192;64;64
+		phosphor-airplane-fill;5;896;192;64;64
+		phosphor-airplane-in-flight-bold;5;960;192;64;64
+		phosphor-airplane-in-flight-duotone;5;0;256;64;64
+		phosphor-airplane-in-flight-fill;5;64;256;64;64
+		phosphor-airplane-in-flight-light;5;128;256;64;64
+		phosphor-airplane-in-flight-thin;5;192;256;64;64
+		phosphor-airplane-in-flight;5;256;256;64;64
+		phosphor-airplane-landing-bold;5;320;256;64;64
+		phosphor-airplane-landing-duotone;5;384;256;64;64
+		phosphor-airplane-landing-fill;5;448;256;64;64
+		phosphor-airplane-landing-light;5;512;256;64;64
+		phosphor-airplane-landing-thin;5;576;256;64;64
+		phosphor-airplane-landing;5;640;256;64;64
+		phosphor-airplane-light;5;704;256;64;64
+		phosphor-airplane-takeoff-bold;5;768;256;64;64
+		phosphor-airplane-takeoff-duotone;5;832;256;64;64
+		phosphor-airplane-takeoff-fill;5;896;256;64;64
+		phosphor-airplane-takeoff-light;5;960;256;64;64
+		phosphor-airplane-takeoff-thin;5;0;320;64;64
+		phosphor-airplane-takeoff;5;64;320;64;64
+		phosphor-airplane-taxiing-bold;5;128;320;64;64
+		phosphor-airplane-taxiing-duotone;5;192;320;64;64
+		phosphor-airplane-taxiing-fill;5;256;320;64;64
+		phosphor-airplane-taxiing-light;5;320;320;64;64
+		phosphor-airplane-taxiing-thin;5;384;320;64;64
+		phosphor-airplane-taxiing;5;448;320;64;64
+		phosphor-airplane-thin;5;512;320;64;64
+		phosphor-airplane-tilt-bold;5;576;320;64;64
+		phosphor-airplane-tilt-duotone;5;640;320;64;64
+		phosphor-airplane-tilt-fill;5;704;320;64;64
+		phosphor-airplane-tilt-light;5;768;320;64;64
+		phosphor-airplane-tilt-thin;5;832;320;64;64
+		phosphor-airplane-tilt;5;896;320;64;64
+		phosphor-airplane;5;960;320;64;64
+		phosphor-airplay-bold;5;0;384;64;64
+		phosphor-airplay-duotone;5;64;384;64;64
+		phosphor-airplay-fill;5;128;384;64;64
+		phosphor-airplay-light;5;192;384;64;64
+		phosphor-airplay-thin;5;256;384;64;64
+		phosphor-airplay;5;320;384;64;64
+		phosphor-alarm-bold;5;384;384;64;64
+		phosphor-alarm-duotone;5;448;384;64;64
+		phosphor-alarm-fill;5;512;384;64;64
+		phosphor-alarm-light;5;576;384;64;64
+		phosphor-alarm-thin;5;640;384;64;64
+		phosphor-alarm;5;704;384;64;64
+		phosphor-alien-bold;5;768;384;64;64
+		phosphor-alien-duotone;5;832;384;64;64
+		phosphor-alien-fill;5;896;384;64;64
+		phosphor-alien-light;5;960;384;64;64
+		phosphor-alien-thin;5;0;448;64;64
+		phosphor-alien;5;64;448;64;64
+		phosphor-align-bottom-bold;5;128;448;64;64
+		phosphor-align-bottom-duotone;5;192;448;64;64
+		phosphor-align-bottom-fill;5;256;448;64;64
+		phosphor-align-bottom-light;5;320;448;64;64
+		phosphor-align-bottom-simple-bold;5;384;448;64;64
+		phosphor-align-bottom-simple-duotone;5;448;448;64;64
+		phosphor-align-bottom-simple-fill;5;512;448;64;64
+		phosphor-align-bottom-simple-light;5;576;448;64;64
+		phosphor-align-bottom-simple-thin;5;640;448;64;64
+		phosphor-align-bottom-simple;5;704;448;64;64
+		phosphor-align-bottom-thin;5;768;448;64;64
+		phosphor-align-bottom;5;832;448;64;64
+		phosphor-align-center-horizontal-bold;5;896;448;64;64
+		phosphor-align-center-horizontal-duotone;5;960;448;64;64
+		phosphor-align-center-horizontal-fill;5;0;512;64;64
+		phosphor-align-center-horizontal-light;5;64;512;64;64
+		phosphor-align-center-horizontal-simple-bold;5;128;512;64;64
+		phosphor-align-center-horizontal-simple-duotone;5;192;512;64;64
+		phosphor-align-center-horizontal-simple-fill;5;256;512;64;64
+		phosphor-align-center-horizontal-simple-light;5;320;512;64;64
+		phosphor-align-center-horizontal-simple-thin;5;384;512;64;64
+		phosphor-align-center-horizontal-simple;5;448;512;64;64
+		phosphor-align-center-horizontal-thin;5;512;512;64;64
+		phosphor-align-center-horizontal;5;576;512;64;64
+		phosphor-align-center-vertical-bold;5;640;512;64;64
+		phosphor-align-center-vertical-duotone;5;704;512;64;64
+		phosphor-align-center-vertical-fill;5;768;512;64;64
+		phosphor-align-center-vertical-light;5;832;512;64;64
+		phosphor-align-center-vertical-simple-bold;5;896;512;64;64
+		phosphor-align-center-vertical-simple-duotone;5;960;512;64;64
+		phosphor-align-center-vertical-simple-fill;5;0;576;64;64
+		phosphor-align-center-vertical-simple-light;5;64;576;64;64
+		phosphor-align-center-vertical-simple-thin;5;128;576;64;64
+		phosphor-align-center-vertical-simple;5;192;576;64;64
+		phosphor-align-center-vertical-thin;5;256;576;64;64
+		phosphor-align-center-vertical;5;320;576;64;64
+		phosphor-align-left-bold;5;384;576;64;64
+		phosphor-align-left-duotone;5;448;576;64;64
+		phosphor-align-left-fill;5;512;576;64;64
+		phosphor-align-left-light;5;576;576;64;64
+		phosphor-align-left-simple-bold;5;640;576;64;64
+		phosphor-align-left-simple-duotone;5;704;576;64;64
+		phosphor-align-left-simple-fill;5;768;576;64;64
+		phosphor-align-left-simple-light;5;832;576;64;64
+		phosphor-align-left-simple-thin;5;896;576;64;64
+		phosphor-align-left-simple;5;960;576;64;64
+		phosphor-align-left-thin;5;0;640;64;64
+		phosphor-align-left;5;64;640;64;64
+		phosphor-align-right-bold;5;128;640;64;64
+		phosphor-align-right-duotone;5;192;640;64;64
+		phosphor-align-right-fill;5;256;640;64;64
+		phosphor-align-right-light;5;320;640;64;64
+		phosphor-align-right-simple-bold;5;384;640;64;64
+		phosphor-align-right-simple-duotone;5;448;640;64;64
+		phosphor-align-right-simple-fill;5;512;640;64;64
+		phosphor-align-right-simple-light;5;576;640;64;64
+		phosphor-align-right-simple-thin;5;640;640;64;64
+		phosphor-align-right-simple;5;704;640;64;64
+		phosphor-align-right-thin;5;768;640;64;64
+		phosphor-align-right;5;832;640;64;64
+		phosphor-align-top-bold;5;896;640;64;64
+		phosphor-align-top-duotone;5;960;640;64;64
+		phosphor-align-top-fill;5;0;704;64;64
+		phosphor-align-top-light;5;64;704;64;64
+		phosphor-align-top-simple-bold;5;128;704;64;64
+		phosphor-align-top-simple-duotone;5;192;704;64;64
+		phosphor-align-top-simple-fill;5;256;704;64;64
+		phosphor-align-top-simple-light;5;320;704;64;64
+		phosphor-align-top-simple-thin;5;384;704;64;64
+		phosphor-align-top-simple;5;448;704;64;64
+		phosphor-align-top-thin;5;512;704;64;64
+		phosphor-align-top;5;576;704;64;64
+		phosphor-amazon-logo-bold;5;640;704;64;64
+		phosphor-amazon-logo-duotone;5;704;704;64;64
+		phosphor-amazon-logo-fill;5;768;704;64;64
+		phosphor-amazon-logo-light;5;832;704;64;64
+		phosphor-amazon-logo-thin;5;896;704;64;64
+		phosphor-amazon-logo;5;960;704;64;64
+		phosphor-ambulance-bold;5;0;768;64;64
+		phosphor-ambulance-duotone;5;64;768;64;64
+		phosphor-ambulance-fill;5;128;768;64;64
+		phosphor-ambulance-light;5;192;768;64;64
+		phosphor-ambulance-thin;5;256;768;64;64
+		phosphor-ambulance;5;320;768;64;64
+		phosphor-anchor-bold;5;384;768;64;64
+		phosphor-anchor-duotone;5;448;768;64;64
+		phosphor-anchor-fill;5;512;768;64;64
+		phosphor-anchor-light;5;576;768;64;64
+		phosphor-anchor-simple-bold;5;640;768;64;64
+		phosphor-anchor-simple-duotone;5;704;768;64;64
+		phosphor-anchor-simple-fill;5;768;768;64;64
+		phosphor-anchor-simple-light;5;832;768;64;64
+		phosphor-anchor-simple-thin;5;896;768;64;64
+		phosphor-anchor-simple;5;960;768;64;64
+		phosphor-anchor-thin;5;0;832;64;64
+		phosphor-anchor;5;64;832;64;64
+		phosphor-android-logo-bold;5;128;832;64;64
+		phosphor-android-logo-duotone;5;192;832;64;64
+		phosphor-android-logo-fill;5;256;832;64;64
+		phosphor-android-logo-light;5;320;832;64;64
+		phosphor-android-logo-thin;5;384;832;64;64
+		phosphor-android-logo;5;448;832;64;64
+		phosphor-angle-bold;5;512;832;64;64
+		phosphor-angle-duotone;5;576;832;64;64
+		phosphor-angle-fill;5;640;832;64;64
+		phosphor-angle-light;5;704;832;64;64
+		phosphor-angle-thin;5;768;832;64;64
+		phosphor-angle;5;832;832;64;64
+		phosphor-angular-logo-bold;5;896;832;64;64
+		phosphor-angular-logo-duotone;5;960;832;64;64
+		phosphor-angular-logo-fill;5;0;896;64;64
+		phosphor-angular-logo-light;5;64;896;64;64
+		phosphor-angular-logo-thin;5;128;896;64;64
+		phosphor-angular-logo;5;192;896;64;64
+		phosphor-aperture-bold;5;256;896;64;64
+		phosphor-aperture-duotone;5;320;896;64;64
+		phosphor-aperture-fill;5;384;896;64;64
+		phosphor-aperture-light;5;448;896;64;64
+		phosphor-aperture-thin;5;512;896;64;64
+		phosphor-aperture;5;576;896;64;64
+		phosphor-app-store-logo-bold;5;640;896;64;64
+		phosphor-app-store-logo-duotone;5;704;896;64;64
+		phosphor-app-store-logo-fill;5;768;896;64;64
+		phosphor-app-store-logo-light;5;832;896;64;64
+		phosphor-app-store-logo-thin;5;896;896;64;64
+		phosphor-app-store-logo;5;960;896;64;64
+		phosphor-app-window-bold;5;0;960;64;64
+		phosphor-app-window-duotone;5;64;960;64;64
+		phosphor-app-window-fill;5;128;960;64;64
+		phosphor-app-window-light;5;192;960;64;64
+		phosphor-app-window-thin;5;256;960;64;64
+		phosphor-app-window;5;320;960;64;64
+		phosphor-apple-logo-bold;5;384;960;64;64
+		phosphor-apple-logo-duotone;5;448;960;64;64
+		phosphor-apple-logo-fill;5;512;960;64;64
+		phosphor-apple-logo-light;5;576;960;64;64
+		phosphor-apple-logo-thin;5;640;960;64;64
+		phosphor-apple-logo;5;704;960;64;64
+		phosphor-apple-podcasts-logo-bold;5;768;960;64;64
+		phosphor-apple-podcasts-logo-duotone;5;832;960;64;64
+		phosphor-apple-podcasts-logo-fill;5;896;960;64;64
+		phosphor-apple-podcasts-logo-light;5;960;960;64;64
+		phosphor-apple-podcasts-logo-thin;6;0;0;64;64
+		phosphor-apple-podcasts-logo;6;64;0;64;64
+		phosphor-approximate-equals-bold;6;128;0;64;64
+		phosphor-approximate-equals-duotone;6;192;0;64;64
+		phosphor-approximate-equals-fill;6;256;0;64;64
+		phosphor-approximate-equals-light;6;320;0;64;64
+		phosphor-approximate-equals-thin;6;384;0;64;64
+		phosphor-approximate-equals;6;448;0;64;64
+		phosphor-archive-bold;6;512;0;64;64
+		phosphor-archive-duotone;6;576;0;64;64
+		phosphor-archive-fill;6;640;0;64;64
+		phosphor-archive-light;6;704;0;64;64
+		phosphor-archive-thin;6;768;0;64;64
+		phosphor-archive;6;832;0;64;64
+		phosphor-armchair-bold;6;896;0;64;64
+		phosphor-armchair-duotone;6;960;0;64;64
+		phosphor-armchair-fill;6;0;64;64;64
+		phosphor-armchair-light;6;64;64;64;64
+		phosphor-armchair-thin;6;128;64;64;64
+		phosphor-armchair;6;192;64;64;64
+		phosphor-arrow-arc-left-bold;6;256;64;64;64
+		phosphor-arrow-arc-left-duotone;6;320;64;64;64
+		phosphor-arrow-arc-left-fill;6;384;64;64;64
+		phosphor-arrow-arc-left-light;6;448;64;64;64
+		phosphor-arrow-arc-left-thin;6;512;64;64;64
+		phosphor-arrow-arc-left;6;576;64;64;64
+		phosphor-arrow-arc-right-bold;6;640;64;64;64
+		phosphor-arrow-arc-right-duotone;6;704;64;64;64
+		phosphor-arrow-arc-right-fill;6;768;64;64;64
+		phosphor-arrow-arc-right-light;6;832;64;64;64
+		phosphor-arrow-arc-right-thin;6;896;64;64;64
+		phosphor-arrow-arc-right;6;960;64;64;64
+		phosphor-arrow-bend-double-up-left-bold;6;0;128;64;64
+		phosphor-arrow-bend-double-up-left-duotone;6;64;128;64;64
+		phosphor-arrow-bend-double-up-left-fill;6;128;128;64;64
+		phosphor-arrow-bend-double-up-left-light;6;192;128;64;64
+		phosphor-arrow-bend-double-up-left-thin;6;256;128;64;64
+		phosphor-arrow-bend-double-up-left;6;320;128;64;64
+		phosphor-arrow-bend-double-up-right-bold;6;384;128;64;64
+		phosphor-arrow-bend-double-up-right-duotone;6;448;128;64;64
+		phosphor-arrow-bend-double-up-right-fill;6;512;128;64;64
+		phosphor-arrow-bend-double-up-right-light;6;576;128;64;64
+		phosphor-arrow-bend-double-up-right-thin;6;640;128;64;64
+		phosphor-arrow-bend-double-up-right;6;704;128;64;64
+		phosphor-arrow-bend-down-left-bold;6;768;128;64;64
+		phosphor-arrow-bend-down-left-duotone;6;832;128;64;64
+		phosphor-arrow-bend-down-left-fill;6;896;128;64;64
+		phosphor-arrow-bend-down-left-light;6;960;128;64;64
+		phosphor-arrow-bend-down-left-thin;6;0;192;64;64
+		phosphor-arrow-bend-down-left;6;64;192;64;64
+		phosphor-arrow-bend-down-right-bold;6;128;192;64;64
+		phosphor-arrow-bend-down-right-duotone;6;192;192;64;64
+		phosphor-arrow-bend-down-right-fill;6;256;192;64;64
+		phosphor-arrow-bend-down-right-light;6;320;192;64;64
+		phosphor-arrow-bend-down-right-thin;6;384;192;64;64
+		phosphor-arrow-bend-down-right;6;448;192;64;64
+		phosphor-arrow-bend-left-down-bold;6;512;192;64;64
+		phosphor-arrow-bend-left-down-duotone;6;576;192;64;64
+		phosphor-arrow-bend-left-down-fill;6;640;192;64;64
+		phosphor-arrow-bend-left-down-light;6;704;192;64;64
+		phosphor-arrow-bend-left-down-thin;6;768;192;64;64
+		phosphor-arrow-bend-left-down;6;832;192;64;64
+		phosphor-arrow-bend-left-up-bold;6;896;192;64;64
+		phosphor-arrow-bend-left-up-duotone;6;960;192;64;64
+		phosphor-arrow-bend-left-up-fill;6;0;256;64;64
+		phosphor-arrow-bend-left-up-light;6;64;256;64;64
+		phosphor-arrow-bend-left-up-thin;6;128;256;64;64
+		phosphor-arrow-bend-left-up;6;192;256;64;64
+		phosphor-arrow-bend-right-down-bold;6;256;256;64;64
+		phosphor-arrow-bend-right-down-duotone;6;320;256;64;64
+		phosphor-arrow-bend-right-down-fill;6;384;256;64;64
+		phosphor-arrow-bend-right-down-light;6;448;256;64;64
+		phosphor-arrow-bend-right-down-thin;6;512;256;64;64
+		phosphor-arrow-bend-right-down;6;576;256;64;64
+		phosphor-arrow-bend-right-up-bold;6;640;256;64;64
+		phosphor-arrow-bend-right-up-duotone;6;704;256;64;64
+		phosphor-arrow-bend-right-up-fill;6;768;256;64;64
+		phosphor-arrow-bend-right-up-light;6;832;256;64;64
+		phosphor-arrow-bend-right-up-thin;6;896;256;64;64
+		phosphor-arrow-bend-right-up;6;960;256;64;64
+		phosphor-arrow-bend-up-left-bold;6;0;320;64;64
+		phosphor-arrow-bend-up-left-duotone;6;64;320;64;64
+		phosphor-arrow-bend-up-left-fill;6;128;320;64;64
+		phosphor-arrow-bend-up-left-light;6;192;320;64;64
+		phosphor-arrow-bend-up-left-thin;6;256;320;64;64
+		phosphor-arrow-bend-up-left;6;320;320;64;64
+		phosphor-arrow-bend-up-right-bold;6;384;320;64;64
+		phosphor-arrow-bend-up-right-duotone;6;448;320;64;64
+		phosphor-arrow-bend-up-right-fill;6;512;320;64;64
+		phosphor-arrow-bend-up-right-light;6;576;320;64;64
+		phosphor-arrow-bend-up-right-thin;6;640;320;64;64
+		phosphor-arrow-bend-up-right;6;704;320;64;64
+		phosphor-arrow-circle-down-bold;6;768;320;64;64
+		phosphor-arrow-circle-down-duotone;6;832;320;64;64
+		phosphor-arrow-circle-down-fill;6;896;320;64;64
+		phosphor-arrow-circle-down-left-bold;6;960;320;64;64
+		phosphor-arrow-circle-down-left-duotone;6;0;384;64;64
+		phosphor-arrow-circle-down-left-fill;6;64;384;64;64
+		phosphor-arrow-circle-down-left-light;6;128;384;64;64
+		phosphor-arrow-circle-down-left-thin;6;192;384;64;64
+		phosphor-arrow-circle-down-left;6;256;384;64;64
+		phosphor-arrow-circle-down-light;6;320;384;64;64
+		phosphor-arrow-circle-down-right-bold;6;384;384;64;64
+		phosphor-arrow-circle-down-right-duotone;6;448;384;64;64
+		phosphor-arrow-circle-down-right-fill;6;512;384;64;64
+		phosphor-arrow-circle-down-right-light;6;576;384;64;64
+		phosphor-arrow-circle-down-right-thin;6;640;384;64;64
+		phosphor-arrow-circle-down-right;6;704;384;64;64
+		phosphor-arrow-circle-down-thin;6;768;384;64;64
+		phosphor-arrow-circle-down;6;832;384;64;64
+		phosphor-arrow-circle-left-bold;6;896;384;64;64
+		phosphor-arrow-circle-left-duotone;6;960;384;64;64
+		phosphor-arrow-circle-left-fill;6;0;448;64;64
+		phosphor-arrow-circle-left-light;6;64;448;64;64
+		phosphor-arrow-circle-left-thin;6;128;448;64;64
+		phosphor-arrow-circle-left;6;192;448;64;64
+		phosphor-arrow-circle-right-bold;6;256;448;64;64
+		phosphor-arrow-circle-right-duotone;6;320;448;64;64
+		phosphor-arrow-circle-right-fill;6;384;448;64;64
+		phosphor-arrow-circle-right-light;6;448;448;64;64
+		phosphor-arrow-circle-right-thin;6;512;448;64;64
+		phosphor-arrow-circle-right;6;576;448;64;64
+		phosphor-arrow-circle-up-bold;6;640;448;64;64
+		phosphor-arrow-circle-up-duotone;6;704;448;64;64
+		phosphor-arrow-circle-up-fill;6;768;448;64;64
+		phosphor-arrow-circle-up-left-bold;6;832;448;64;64
+		phosphor-arrow-circle-up-left-duotone;6;896;448;64;64
+		phosphor-arrow-circle-up-left-fill;6;960;448;64;64
+		phosphor-arrow-circle-up-left-light;6;0;512;64;64
+		phosphor-arrow-circle-up-left-thin;6;64;512;64;64
+		phosphor-arrow-circle-up-left;6;128;512;64;64
+		phosphor-arrow-circle-up-light;6;192;512;64;64
+		phosphor-arrow-circle-up-right-bold;6;256;512;64;64
+		phosphor-arrow-circle-up-right-duotone;6;320;512;64;64
+		phosphor-arrow-circle-up-right-fill;6;384;512;64;64
+		phosphor-arrow-circle-up-right-light;6;448;512;64;64
+		phosphor-arrow-circle-up-right-thin;6;512;512;64;64
+		phosphor-arrow-circle-up-right;6;576;512;64;64
+		phosphor-arrow-circle-up-thin;6;640;512;64;64
+		phosphor-arrow-circle-up;6;704;512;64;64
+		phosphor-arrow-clockwise-bold;6;768;512;64;64
+		phosphor-arrow-clockwise-duotone;6;832;512;64;64
+		phosphor-arrow-clockwise-fill;6;896;512;64;64
+		phosphor-arrow-clockwise-light;6;960;512;64;64
+		phosphor-arrow-clockwise-thin;6;0;576;64;64
+		phosphor-arrow-clockwise;6;64;576;64;64
+		phosphor-arrow-counter-clockwise-bold;6;128;576;64;64
+		phosphor-arrow-counter-clockwise-duotone;6;192;576;64;64
+		phosphor-arrow-counter-clockwise-fill;6;256;576;64;64
+		phosphor-arrow-counter-clockwise-light;6;320;576;64;64
+		phosphor-arrow-counter-clockwise-thin;6;384;576;64;64
+		phosphor-arrow-counter-clockwise;6;448;576;64;64
+		phosphor-arrow-down-bold;6;512;576;64;64
+		phosphor-arrow-down-duotone;6;576;576;64;64
+		phosphor-arrow-down-fill;6;640;576;64;64
+		phosphor-arrow-down-left-bold;6;704;576;64;64
+		phosphor-arrow-down-left-duotone;6;768;576;64;64
+		phosphor-arrow-down-left-fill;6;832;576;64;64
+		phosphor-arrow-down-left-light;6;896;576;64;64
+		phosphor-arrow-down-left-thin;6;960;576;64;64
+		phosphor-arrow-down-left;6;0;640;64;64
+		phosphor-arrow-down-light;6;64;640;64;64
+		phosphor-arrow-down-right-bold;6;128;640;64;64
+		phosphor-arrow-down-right-duotone;6;192;640;64;64
+		phosphor-arrow-down-right-fill;6;256;640;64;64
+		phosphor-arrow-down-right-light;6;320;640;64;64
+		phosphor-arrow-down-right-thin;6;384;640;64;64
+		phosphor-arrow-down-right;6;448;640;64;64
+		phosphor-arrow-down-thin;6;512;640;64;64
+		phosphor-arrow-down;6;576;640;64;64
+		phosphor-arrow-elbow-down-left-bold;6;640;640;64;64
+		phosphor-arrow-elbow-down-left-duotone;6;704;640;64;64
+		phosphor-arrow-elbow-down-left-fill;6;768;640;64;64
+		phosphor-arrow-elbow-down-left-light;6;832;640;64;64
+		phosphor-arrow-elbow-down-left-thin;6;896;640;64;64
+		phosphor-arrow-elbow-down-left;6;960;640;64;64
+		phosphor-arrow-elbow-down-right-bold;6;0;704;64;64
+		phosphor-arrow-elbow-down-right-duotone;6;64;704;64;64
+		phosphor-arrow-elbow-down-right-fill;6;128;704;64;64
+		phosphor-arrow-elbow-down-right-light;6;192;704;64;64
+		phosphor-arrow-elbow-down-right-thin;6;256;704;64;64
+		phosphor-arrow-elbow-down-right;6;320;704;64;64
+		phosphor-arrow-elbow-left-bold;6;384;704;64;64
+		phosphor-arrow-elbow-left-down-bold;6;448;704;64;64
+		phosphor-arrow-elbow-left-down-duotone;6;512;704;64;64
+		phosphor-arrow-elbow-left-down-fill;6;576;704;64;64
+		phosphor-arrow-elbow-left-down-light;6;640;704;64;64
+		phosphor-arrow-elbow-left-down-thin;6;704;704;64;64
+		phosphor-arrow-elbow-left-down;6;768;704;64;64
+		phosphor-arrow-elbow-left-duotone;6;832;704;64;64
+		phosphor-arrow-elbow-left-fill;6;896;704;64;64
+		phosphor-arrow-elbow-left-light;6;960;704;64;64
+		phosphor-arrow-elbow-left-thin;6;0;768;64;64
+		phosphor-arrow-elbow-left-up-bold;6;64;768;64;64
+		phosphor-arrow-elbow-left-up-duotone;6;128;768;64;64
+		phosphor-arrow-elbow-left-up-fill;6;192;768;64;64
+		phosphor-arrow-elbow-left-up-light;6;256;768;64;64
+		phosphor-arrow-elbow-left-up-thin;6;320;768;64;64
+		phosphor-arrow-elbow-left-up;6;384;768;64;64
+		phosphor-arrow-elbow-left;6;448;768;64;64
+		phosphor-arrow-elbow-right-bold;6;512;768;64;64
+		phosphor-arrow-elbow-right-down-bold;6;576;768;64;64
+		phosphor-arrow-elbow-right-down-duotone;6;640;768;64;64
+		phosphor-arrow-elbow-right-down-fill;6;704;768;64;64
+		phosphor-arrow-elbow-right-down-light;6;768;768;64;64
+		phosphor-arrow-elbow-right-down-thin;6;832;768;64;64
+		phosphor-arrow-elbow-right-down;6;896;768;64;64
+		phosphor-arrow-elbow-right-duotone;6;960;768;64;64
+		phosphor-arrow-elbow-right-fill;6;0;832;64;64
+		phosphor-arrow-elbow-right-light;6;64;832;64;64
+		phosphor-arrow-elbow-right-thin;6;128;832;64;64
+		phosphor-arrow-elbow-right-up-bold;6;192;832;64;64
+		phosphor-arrow-elbow-right-up-duotone;6;256;832;64;64
+		phosphor-arrow-elbow-right-up-fill;6;320;832;64;64
+		phosphor-arrow-elbow-right-up-light;6;384;832;64;64
+		phosphor-arrow-elbow-right-up-thin;6;448;832;64;64
+		phosphor-arrow-elbow-right-up;6;512;832;64;64
+		phosphor-arrow-elbow-right;6;576;832;64;64
+		phosphor-arrow-elbow-up-left-bold;6;640;832;64;64
+		phosphor-arrow-elbow-up-left-duotone;6;704;832;64;64
+		phosphor-arrow-elbow-up-left-fill;6;768;832;64;64
+		phosphor-arrow-elbow-up-left-light;6;832;832;64;64
+		phosphor-arrow-elbow-up-left-thin;6;896;832;64;64
+		phosphor-arrow-elbow-up-left;6;960;832;64;64
+		phosphor-arrow-elbow-up-right-bold;6;0;896;64;64
+		phosphor-arrow-elbow-up-right-duotone;6;64;896;64;64
+		phosphor-arrow-elbow-up-right-fill;6;128;896;64;64
+		phosphor-arrow-elbow-up-right-light;6;192;896;64;64
+		phosphor-arrow-elbow-up-right-thin;6;256;896;64;64
+		phosphor-arrow-elbow-up-right;6;320;896;64;64
+		phosphor-arrow-fat-down-bold;6;384;896;64;64
+		phosphor-arrow-fat-down-duotone;6;448;896;64;64
+		phosphor-arrow-fat-down-fill;6;512;896;64;64
+		phosphor-arrow-fat-down-light;6;576;896;64;64
+		phosphor-arrow-fat-down-thin;6;640;896;64;64
+		phosphor-arrow-fat-down;6;704;896;64;64
+		phosphor-arrow-fat-left-bold;6;768;896;64;64
+		phosphor-arrow-fat-left-duotone;6;832;896;64;64
+		phosphor-arrow-fat-left-fill;6;896;896;64;64
+		phosphor-arrow-fat-left-light;6;960;896;64;64
+		phosphor-arrow-fat-left-thin;6;0;960;64;64
+		phosphor-arrow-fat-left;6;64;960;64;64
+		phosphor-arrow-fat-line-down-bold;6;128;960;64;64
+		phosphor-arrow-fat-line-down-duotone;6;192;960;64;64
+		phosphor-arrow-fat-line-down-fill;6;256;960;64;64
+		phosphor-arrow-fat-line-down-light;6;320;960;64;64
+		phosphor-arrow-fat-line-down-thin;6;384;960;64;64
+		phosphor-arrow-fat-line-down;6;448;960;64;64
+		phosphor-arrow-fat-line-left-bold;6;512;960;64;64
+		phosphor-arrow-fat-line-left-duotone;6;576;960;64;64
+		phosphor-arrow-fat-line-left-fill;6;640;960;64;64
+		phosphor-arrow-fat-line-left-light;6;704;960;64;64
+		phosphor-arrow-fat-line-left-thin;6;768;960;64;64
+		phosphor-arrow-fat-line-left;6;832;960;64;64
+		phosphor-arrow-fat-line-right-bold;6;896;960;64;64
+		phosphor-arrow-fat-line-right-duotone;6;960;960;64;64
+		phosphor-arrow-fat-line-right-fill;7;0;0;64;64
+		phosphor-arrow-fat-line-right-light;7;64;0;64;64
+		phosphor-arrow-fat-line-right-thin;7;128;0;64;64
+		phosphor-arrow-fat-line-right;7;192;0;64;64
+		phosphor-arrow-fat-line-up-bold;7;256;0;64;64
+		phosphor-arrow-fat-line-up-duotone;7;320;0;64;64
+		phosphor-arrow-fat-line-up-fill;7;384;0;64;64
+		phosphor-arrow-fat-line-up-light;7;448;0;64;64
+		phosphor-arrow-fat-line-up-thin;7;512;0;64;64
+		phosphor-arrow-fat-line-up;7;576;0;64;64
+		phosphor-arrow-fat-lines-down-bold;7;640;0;64;64
+		phosphor-arrow-fat-lines-down-duotone;7;704;0;64;64
+		phosphor-arrow-fat-lines-down-fill;7;768;0;64;64
+		phosphor-arrow-fat-lines-down-light;7;832;0;64;64
+		phosphor-arrow-fat-lines-down-thin;7;896;0;64;64
+		phosphor-arrow-fat-lines-down;7;960;0;64;64
+		phosphor-arrow-fat-lines-left-bold;7;0;64;64;64
+		phosphor-arrow-fat-lines-left-duotone;7;64;64;64;64
+		phosphor-arrow-fat-lines-left-fill;7;128;64;64;64
+		phosphor-arrow-fat-lines-left-light;7;192;64;64;64
+		phosphor-arrow-fat-lines-left-thin;7;256;64;64;64
+		phosphor-arrow-fat-lines-left;7;320;64;64;64
+		phosphor-arrow-fat-lines-right-bold;7;384;64;64;64
+		phosphor-arrow-fat-lines-right-duotone;7;448;64;64;64
+		phosphor-arrow-fat-lines-right-fill;7;512;64;64;64
+		phosphor-arrow-fat-lines-right-light;7;576;64;64;64
+		phosphor-arrow-fat-lines-right-thin;7;640;64;64;64
+		phosphor-arrow-fat-lines-right;7;704;64;64;64
+		phosphor-arrow-fat-lines-up-bold;7;768;64;64;64
+		phosphor-arrow-fat-lines-up-duotone;7;832;64;64;64
+		phosphor-arrow-fat-lines-up-fill;7;896;64;64;64
+		phosphor-arrow-fat-lines-up-light;7;960;64;64;64
+		phosphor-arrow-fat-lines-up-thin;7;0;128;64;64
+		phosphor-arrow-fat-lines-up;7;64;128;64;64
+		phosphor-arrow-fat-right-bold;7;128;128;64;64
+		phosphor-arrow-fat-right-duotone;7;192;128;64;64
+		phosphor-arrow-fat-right-fill;7;256;128;64;64
+		phosphor-arrow-fat-right-light;7;320;128;64;64
+		phosphor-arrow-fat-right-thin;7;384;128;64;64
+		phosphor-arrow-fat-right;7;448;128;64;64
+		phosphor-arrow-fat-up-bold;7;512;128;64;64
+		phosphor-arrow-fat-up-duotone;7;576;128;64;64
+		phosphor-arrow-fat-up-fill;7;640;128;64;64
+		phosphor-arrow-fat-up-light;7;704;128;64;64
+		phosphor-arrow-fat-up-thin;7;768;128;64;64
+		phosphor-arrow-fat-up;7;832;128;64;64
+		phosphor-arrow-left-bold;7;896;128;64;64
+		phosphor-arrow-left-duotone;7;960;128;64;64
+		phosphor-arrow-left-fill;7;0;192;64;64
+		phosphor-arrow-left-light;7;64;192;64;64
+		phosphor-arrow-left-thin;7;128;192;64;64
+		phosphor-arrow-left;7;192;192;64;64
+		phosphor-arrow-line-down-bold;7;256;192;64;64
+		phosphor-arrow-line-down-duotone;7;320;192;64;64
+		phosphor-arrow-line-down-fill;7;384;192;64;64
+		phosphor-arrow-line-down-left-bold;7;448;192;64;64
+		phosphor-arrow-line-down-left-duotone;7;512;192;64;64
+		phosphor-arrow-line-down-left-fill;7;576;192;64;64
+		phosphor-arrow-line-down-left-light;7;640;192;64;64
+		phosphor-arrow-line-down-left-thin;7;704;192;64;64
+		phosphor-arrow-line-down-left;7;768;192;64;64
+		phosphor-arrow-line-down-light;7;832;192;64;64
+		phosphor-arrow-line-down-right-bold;7;896;192;64;64
+		phosphor-arrow-line-down-right-duotone;7;960;192;64;64
+		phosphor-arrow-line-down-right-fill;7;0;256;64;64
+		phosphor-arrow-line-down-right-light;7;64;256;64;64
+		phosphor-arrow-line-down-right-thin;7;128;256;64;64
+		phosphor-arrow-line-down-right;7;192;256;64;64
+		phosphor-arrow-line-down-thin;7;256;256;64;64
+		phosphor-arrow-line-down;7;320;256;64;64
+		phosphor-arrow-line-left-bold;7;384;256;64;64
+		phosphor-arrow-line-left-duotone;7;448;256;64;64
+		phosphor-arrow-line-left-fill;7;512;256;64;64
+		phosphor-arrow-line-left-light;7;576;256;64;64
+		phosphor-arrow-line-left-thin;7;640;256;64;64
+		phosphor-arrow-line-left;7;704;256;64;64
+		phosphor-arrow-line-right-bold;7;768;256;64;64
+		phosphor-arrow-line-right-duotone;7;832;256;64;64
+		phosphor-arrow-line-right-fill;7;896;256;64;64
+		phosphor-arrow-line-right-light;7;960;256;64;64
+		phosphor-arrow-line-right-thin;7;0;320;64;64
+		phosphor-arrow-line-right;7;64;320;64;64
+		phosphor-arrow-line-up-bold;7;128;320;64;64
+		phosphor-arrow-line-up-duotone;7;192;320;64;64
+		phosphor-arrow-line-up-fill;7;256;320;64;64
+		phosphor-arrow-line-up-left-bold;7;320;320;64;64
+		phosphor-arrow-line-up-left-duotone;7;384;320;64;64
+		phosphor-arrow-line-up-left-fill;7;448;320;64;64
+		phosphor-arrow-line-up-left-light;7;512;320;64;64
+		phosphor-arrow-line-up-left-thin;7;576;320;64;64
+		phosphor-arrow-line-up-left;7;640;320;64;64
+		phosphor-arrow-line-up-light;7;704;320;64;64
+		phosphor-arrow-line-up-right-bold;7;768;320;64;64
+		phosphor-arrow-line-up-right-duotone;7;832;320;64;64
+		phosphor-arrow-line-up-right-fill;7;896;320;64;64
+		phosphor-arrow-line-up-right-light;7;960;320;64;64
+		phosphor-arrow-line-up-right-thin;7;0;384;64;64
+		phosphor-arrow-line-up-right;7;64;384;64;64
+		phosphor-arrow-line-up-thin;7;128;384;64;64
+		phosphor-arrow-line-up;7;192;384;64;64
+		phosphor-arrow-right-bold;7;256;384;64;64
+		phosphor-arrow-right-duotone;7;320;384;64;64
+		phosphor-arrow-right-fill;7;384;384;64;64
+		phosphor-arrow-right-light;7;448;384;64;64
+		phosphor-arrow-right-thin;7;512;384;64;64
+		phosphor-arrow-right;7;576;384;64;64
+		phosphor-arrow-square-down-bold;7;640;384;64;64
+		phosphor-arrow-square-down-duotone;7;704;384;64;64
+		phosphor-arrow-square-down-fill;7;768;384;64;64
+		phosphor-arrow-square-down-left-bold;7;832;384;64;64
+		phosphor-arrow-square-down-left-duotone;7;896;384;64;64
+		phosphor-arrow-square-down-left-fill;7;960;384;64;64
+		phosphor-arrow-square-down-left-light;7;0;448;64;64
+		phosphor-arrow-square-down-left-thin;7;64;448;64;64
+		phosphor-arrow-square-down-left;7;128;448;64;64
+		phosphor-arrow-square-down-light;7;192;448;64;64
+		phosphor-arrow-square-down-right-bold;7;256;448;64;64
+		phosphor-arrow-square-down-right-duotone;7;320;448;64;64
+		phosphor-arrow-square-down-right-fill;7;384;448;64;64
+		phosphor-arrow-square-down-right-light;7;448;448;64;64
+		phosphor-arrow-square-down-right-thin;7;512;448;64;64
+		phosphor-arrow-square-down-right;7;576;448;64;64
+		phosphor-arrow-square-down-thin;7;640;448;64;64
+		phosphor-arrow-square-down;7;704;448;64;64
+		phosphor-arrow-square-in-bold;7;768;448;64;64
+		phosphor-arrow-square-in-duotone;7;832;448;64;64
+		phosphor-arrow-square-in-fill;7;896;448;64;64
+		phosphor-arrow-square-in-light;7;960;448;64;64
+		phosphor-arrow-square-in-thin;7;0;512;64;64
+		phosphor-arrow-square-in;7;64;512;64;64
+		phosphor-arrow-square-left-bold;7;128;512;64;64
+		phosphor-arrow-square-left-duotone;7;192;512;64;64
+		phosphor-arrow-square-left-fill;7;256;512;64;64
+		phosphor-arrow-square-left-light;7;320;512;64;64
+		phosphor-arrow-square-left-thin;7;384;512;64;64
+		phosphor-arrow-square-left;7;448;512;64;64
+		phosphor-arrow-square-out-bold;7;512;512;64;64
+		phosphor-arrow-square-out-duotone;7;576;512;64;64
+		phosphor-arrow-square-out-fill;7;640;512;64;64
+		phosphor-arrow-square-out-light;7;704;512;64;64
+		phosphor-arrow-square-out-thin;7;768;512;64;64
+		phosphor-arrow-square-out;7;832;512;64;64
+		phosphor-arrow-square-right-bold;7;896;512;64;64
+		phosphor-arrow-square-right-duotone;7;960;512;64;64
+		phosphor-arrow-square-right-fill;7;0;576;64;64
+		phosphor-arrow-square-right-light;7;64;576;64;64
+		phosphor-arrow-square-right-thin;7;128;576;64;64
+		phosphor-arrow-square-right;7;192;576;64;64
+		phosphor-arrow-square-up-bold;7;256;576;64;64
+		phosphor-arrow-square-up-duotone;7;320;576;64;64
+		phosphor-arrow-square-up-fill;7;384;576;64;64
+		phosphor-arrow-square-up-left-bold;7;448;576;64;64
+		phosphor-arrow-square-up-left-duotone;7;512;576;64;64
+		phosphor-arrow-square-up-left-fill;7;576;576;64;64
+		phosphor-arrow-square-up-left-light;7;640;576;64;64
+		phosphor-arrow-square-up-left-thin;7;704;576;64;64
+		phosphor-arrow-square-up-left;7;768;576;64;64
+		phosphor-arrow-square-up-light;7;832;576;64;64
+		phosphor-arrow-square-up-right-bold;7;896;576;64;64
+		phosphor-arrow-square-up-right-duotone;7;960;576;64;64
+		phosphor-arrow-square-up-right-fill;7;0;640;64;64
+		phosphor-arrow-square-up-right-light;7;64;640;64;64
+		phosphor-arrow-square-up-right-thin;7;128;640;64;64
+		phosphor-arrow-square-up-right;7;192;640;64;64
+		phosphor-arrow-square-up-thin;7;256;640;64;64
+		phosphor-arrow-square-up;7;320;640;64;64
+		phosphor-arrow-u-down-left-bold;7;384;640;64;64
+		phosphor-arrow-u-down-left-duotone;7;448;640;64;64
+		phosphor-arrow-u-down-left-fill;7;512;640;64;64
+		phosphor-arrow-u-down-left-light;7;576;640;64;64
+		phosphor-arrow-u-down-left-thin;7;640;640;64;64
+		phosphor-arrow-u-down-left;7;704;640;64;64
+		phosphor-arrow-u-down-right-bold;7;768;640;64;64
+		phosphor-arrow-u-down-right-duotone;7;832;640;64;64
+		phosphor-arrow-u-down-right-fill;7;896;640;64;64
+		phosphor-arrow-u-down-right-light;7;960;640;64;64
+		phosphor-arrow-u-down-right-thin;7;0;704;64;64
+		phosphor-arrow-u-down-right;7;64;704;64;64
+		phosphor-arrow-u-left-down-bold;7;128;704;64;64
+		phosphor-arrow-u-left-down-duotone;7;192;704;64;64
+		phosphor-arrow-u-left-down-fill;7;256;704;64;64
+		phosphor-arrow-u-left-down-light;7;320;704;64;64
+		phosphor-arrow-u-left-down-thin;7;384;704;64;64
+		phosphor-arrow-u-left-down;7;448;704;64;64
+		phosphor-arrow-u-left-up-bold;7;512;704;64;64
+		phosphor-arrow-u-left-up-duotone;7;576;704;64;64
+		phosphor-arrow-u-left-up-fill;7;640;704;64;64
+		phosphor-arrow-u-left-up-light;7;704;704;64;64
+		phosphor-arrow-u-left-up-thin;7;768;704;64;64
+		phosphor-arrow-u-left-up;7;832;704;64;64
+		phosphor-arrow-u-right-down-bold;7;896;704;64;64
+		phosphor-arrow-u-right-down-duotone;7;960;704;64;64
+		phosphor-arrow-u-right-down-fill;7;0;768;64;64
+		phosphor-arrow-u-right-down-light;7;64;768;64;64
+		phosphor-arrow-u-right-down-thin;7;128;768;64;64
+		phosphor-arrow-u-right-down;7;192;768;64;64
+		phosphor-arrow-u-right-up-bold;7;256;768;64;64
+		phosphor-arrow-u-right-up-duotone;7;320;768;64;64
+		phosphor-arrow-u-right-up-fill;7;384;768;64;64
+		phosphor-arrow-u-right-up-light;7;448;768;64;64
+		phosphor-arrow-u-right-up-thin;7;512;768;64;64
+		phosphor-arrow-u-right-up;7;576;768;64;64
+		phosphor-arrow-u-up-left-bold;7;640;768;64;64
+		phosphor-arrow-u-up-left-duotone;7;704;768;64;64
+		phosphor-arrow-u-up-left-fill;7;768;768;64;64
+		phosphor-arrow-u-up-left-light;7;832;768;64;64
+		phosphor-arrow-u-up-left-thin;7;896;768;64;64
+		phosphor-arrow-u-up-left;7;960;768;64;64
+		phosphor-arrow-u-up-right-bold;7;0;832;64;64
+		phosphor-arrow-u-up-right-duotone;7;64;832;64;64
+		phosphor-arrow-u-up-right-fill;7;128;832;64;64
+		phosphor-arrow-u-up-right-light;7;192;832;64;64
+		phosphor-arrow-u-up-right-thin;7;256;832;64;64
+		phosphor-arrow-u-up-right;7;320;832;64;64
+		phosphor-arrow-up-bold;7;384;832;64;64
+		phosphor-arrow-up-duotone;7;448;832;64;64
+		phosphor-arrow-up-fill;7;512;832;64;64
+		phosphor-arrow-up-left-bold;7;576;832;64;64
+		phosphor-arrow-up-left-duotone;7;640;832;64;64
+		phosphor-arrow-up-left-fill;7;704;832;64;64
+		phosphor-arrow-up-left-light;7;768;832;64;64
+		phosphor-arrow-up-left-thin;7;832;832;64;64
+		phosphor-arrow-up-left;7;896;832;64;64
+		phosphor-arrow-up-light;7;960;832;64;64
+		phosphor-arrow-up-right-bold;7;0;896;64;64
+		phosphor-arrow-up-right-duotone;7;64;896;64;64
+		phosphor-arrow-up-right-fill;7;128;896;64;64
+		phosphor-arrow-up-right-light;7;192;896;64;64
+		phosphor-arrow-up-right-thin;7;256;896;64;64
+		phosphor-arrow-up-right;7;320;896;64;64
+		phosphor-arrow-up-thin;7;384;896;64;64
+		phosphor-arrow-up;7;448;896;64;64
+		phosphor-arrows-clockwise-bold;7;512;896;64;64
+		phosphor-arrows-clockwise-duotone;7;576;896;64;64
+		phosphor-arrows-clockwise-fill;7;640;896;64;64
+		phosphor-arrows-clockwise-light;7;704;896;64;64
+		phosphor-arrows-clockwise-thin;7;768;896;64;64
+		phosphor-arrows-clockwise;7;832;896;64;64
+		phosphor-arrows-counter-clockwise-bold;7;896;896;64;64
+		phosphor-arrows-counter-clockwise-duotone;7;960;896;64;64
+		phosphor-arrows-counter-clockwise-fill;7;0;960;64;64
+		phosphor-arrows-counter-clockwise-light;7;64;960;64;64
+		phosphor-arrows-counter-clockwise-thin;7;128;960;64;64
+		phosphor-arrows-counter-clockwise;7;192;960;64;64
+		phosphor-arrows-down-up-bold;7;256;960;64;64
+		phosphor-arrows-down-up-duotone;7;320;960;64;64
+		phosphor-arrows-down-up-fill;7;384;960;64;64
+		phosphor-arrows-down-up-light;7;448;960;64;64
+		phosphor-arrows-down-up-thin;7;512;960;64;64
+		phosphor-arrows-down-up;7;576;960;64;64
+		phosphor-arrows-horizontal-bold;7;640;960;64;64
+		phosphor-arrows-horizontal-duotone;7;704;960;64;64
+		phosphor-arrows-horizontal-fill;7;768;960;64;64
+		phosphor-arrows-horizontal-light;7;832;960;64;64
+		phosphor-arrows-horizontal-thin;7;896;960;64;64
+		phosphor-arrows-horizontal;7;960;960;64;64
+		phosphor-arrows-in-bold;8;0;0;64;64
+		phosphor-arrows-in-cardinal-bold;8;64;0;64;64
+		phosphor-arrows-in-cardinal-duotone;8;128;0;64;64
+		phosphor-arrows-in-cardinal-fill;8;192;0;64;64
+		phosphor-arrows-in-cardinal-light;8;256;0;64;64
+		phosphor-arrows-in-cardinal-thin;8;320;0;64;64
+		phosphor-arrows-in-cardinal;8;384;0;64;64
+		phosphor-arrows-in-duotone;8;448;0;64;64
+		phosphor-arrows-in-fill;8;512;0;64;64
+		phosphor-arrows-in-light;8;576;0;64;64
+		phosphor-arrows-in-line-horizontal-bold;8;640;0;64;64
+		phosphor-arrows-in-line-horizontal-duotone;8;704;0;64;64
+		phosphor-arrows-in-line-horizontal-fill;8;768;0;64;64
+		phosphor-arrows-in-line-horizontal-light;8;832;0;64;64
+		phosphor-arrows-in-line-horizontal-thin;8;896;0;64;64
+		phosphor-arrows-in-line-horizontal;8;960;0;64;64
+		phosphor-arrows-in-line-vertical-bold;8;0;64;64;64
+		phosphor-arrows-in-line-vertical-duotone;8;64;64;64;64
+		phosphor-arrows-in-line-vertical-fill;8;128;64;64;64
+		phosphor-arrows-in-line-vertical-light;8;192;64;64;64
+		phosphor-arrows-in-line-vertical-thin;8;256;64;64;64
+		phosphor-arrows-in-line-vertical;8;320;64;64;64
+		phosphor-arrows-in-simple-bold;8;384;64;64;64
+		phosphor-arrows-in-simple-duotone;8;448;64;64;64
+		phosphor-arrows-in-simple-fill;8;512;64;64;64
+		phosphor-arrows-in-simple-light;8;576;64;64;64
+		phosphor-arrows-in-simple-thin;8;640;64;64;64
+		phosphor-arrows-in-simple;8;704;64;64;64
+		phosphor-arrows-in-thin;8;768;64;64;64
+		phosphor-arrows-in;8;832;64;64;64
+		phosphor-arrows-left-right-bold;8;896;64;64;64
+		phosphor-arrows-left-right-duotone;8;960;64;64;64
+		phosphor-arrows-left-right-fill;8;0;128;64;64
+		phosphor-arrows-left-right-light;8;64;128;64;64
+		phosphor-arrows-left-right-thin;8;128;128;64;64
+		phosphor-arrows-left-right;8;192;128;64;64
+		phosphor-arrows-merge-bold;8;256;128;64;64
+		phosphor-arrows-merge-duotone;8;320;128;64;64
+		phosphor-arrows-merge-fill;8;384;128;64;64
+		phosphor-arrows-merge-light;8;448;128;64;64
+		phosphor-arrows-merge-thin;8;512;128;64;64
+		phosphor-arrows-merge;8;576;128;64;64
+		phosphor-arrows-out-bold;8;640;128;64;64
+		phosphor-arrows-out-cardinal-bold;8;704;128;64;64
+		phosphor-arrows-out-cardinal-duotone;8;768;128;64;64
+		phosphor-arrows-out-cardinal-fill;8;832;128;64;64
+		phosphor-arrows-out-cardinal-light;8;896;128;64;64
+		phosphor-arrows-out-cardinal-thin;8;960;128;64;64
+		phosphor-arrows-out-cardinal;8;0;192;64;64
+		phosphor-arrows-out-duotone;8;64;192;64;64
+		phosphor-arrows-out-fill;8;128;192;64;64
+		phosphor-arrows-out-light;8;192;192;64;64
+		phosphor-arrows-out-line-horizontal-bold;8;256;192;64;64
+		phosphor-arrows-out-line-horizontal-duotone;8;320;192;64;64
+		phosphor-arrows-out-line-horizontal-fill;8;384;192;64;64
+		phosphor-arrows-out-line-horizontal-light;8;448;192;64;64
+		phosphor-arrows-out-line-horizontal-thin;8;512;192;64;64
+		phosphor-arrows-out-line-horizontal;8;576;192;64;64
+		phosphor-arrows-out-line-vertical-bold;8;640;192;64;64
+		phosphor-arrows-out-line-vertical-duotone;8;704;192;64;64
+		phosphor-arrows-out-line-vertical-fill;8;768;192;64;64
+		phosphor-arrows-out-line-vertical-light;8;832;192;64;64
+		phosphor-arrows-out-line-vertical-thin;8;896;192;64;64
+		phosphor-arrows-out-line-vertical;8;960;192;64;64
+		phosphor-arrows-out-simple-bold;8;0;256;64;64
+		phosphor-arrows-out-simple-duotone;8;64;256;64;64
+		phosphor-arrows-out-simple-fill;8;128;256;64;64
+		phosphor-arrows-out-simple-light;8;192;256;64;64
+		phosphor-arrows-out-simple-thin;8;256;256;64;64
+		phosphor-arrows-out-simple;8;320;256;64;64
+		phosphor-arrows-out-thin;8;384;256;64;64
+		phosphor-arrows-out;8;448;256;64;64
+		phosphor-arrows-split-bold;8;512;256;64;64
+		phosphor-arrows-split-duotone;8;576;256;64;64
+		phosphor-arrows-split-fill;8;640;256;64;64
+		phosphor-arrows-split-light;8;704;256;64;64
+		phosphor-arrows-split-thin;8;768;256;64;64
+		phosphor-arrows-split;8;832;256;64;64
+		phosphor-arrows-vertical-bold;8;896;256;64;64
+		phosphor-arrows-vertical-duotone;8;960;256;64;64
+		phosphor-arrows-vertical-fill;8;0;320;64;64
+		phosphor-arrows-vertical-light;8;64;320;64;64
+		phosphor-arrows-vertical-thin;8;128;320;64;64
+		phosphor-arrows-vertical;8;192;320;64;64
+		phosphor-article-bold;8;256;320;64;64
+		phosphor-article-duotone;8;320;320;64;64
+		phosphor-article-fill;8;384;320;64;64
+		phosphor-article-light;8;448;320;64;64
+		phosphor-article-medium-bold;8;512;320;64;64
+		phosphor-article-medium-duotone;8;576;320;64;64
+		phosphor-article-medium-fill;8;640;320;64;64
+		phosphor-article-medium-light;8;704;320;64;64
+		phosphor-article-medium-thin;8;768;320;64;64
+		phosphor-article-medium;8;832;320;64;64
+		phosphor-article-ny-times-bold;8;896;320;64;64
+		phosphor-article-ny-times-duotone;8;960;320;64;64
+		phosphor-article-ny-times-fill;8;0;384;64;64
+		phosphor-article-ny-times-light;8;64;384;64;64
+		phosphor-article-ny-times-thin;8;128;384;64;64
+		phosphor-article-ny-times;8;192;384;64;64
+		phosphor-article-thin;8;256;384;64;64
+		phosphor-article;8;320;384;64;64
+		phosphor-asclepius-bold;8;384;384;64;64
+		phosphor-asclepius-duotone;8;448;384;64;64
+		phosphor-asclepius-fill;8;512;384;64;64
+		phosphor-asclepius-light;8;576;384;64;64
+		phosphor-asclepius-thin;8;640;384;64;64
+		phosphor-asclepius;8;704;384;64;64
+		phosphor-asterisk-bold;8;768;384;64;64
+		phosphor-asterisk-duotone;8;832;384;64;64
+		phosphor-asterisk-fill;8;896;384;64;64
+		phosphor-asterisk-light;8;960;384;64;64
+		phosphor-asterisk-simple-bold;8;0;448;64;64
+		phosphor-asterisk-simple-duotone;8;64;448;64;64
+		phosphor-asterisk-simple-fill;8;128;448;64;64
+		phosphor-asterisk-simple-light;8;192;448;64;64
+		phosphor-asterisk-simple-thin;8;256;448;64;64
+		phosphor-asterisk-simple;8;320;448;64;64
+		phosphor-asterisk-thin;8;384;448;64;64
+		phosphor-asterisk;8;448;448;64;64
+		phosphor-at-bold;8;512;448;64;64
+		phosphor-at-duotone;8;576;448;64;64
+		phosphor-at-fill;8;640;448;64;64
+		phosphor-at-light;8;704;448;64;64
+		phosphor-at-thin;8;768;448;64;64
+		phosphor-at;8;832;448;64;64
+		phosphor-atom-bold;8;896;448;64;64
+		phosphor-atom-duotone;8;960;448;64;64
+		phosphor-atom-fill;8;0;512;64;64
+		phosphor-atom-light;8;64;512;64;64
+		phosphor-atom-thin;8;128;512;64;64
+		phosphor-atom;8;192;512;64;64
+		phosphor-avocado-bold;8;256;512;64;64
+		phosphor-avocado-duotone;8;320;512;64;64
+		phosphor-avocado-fill;8;384;512;64;64
+		phosphor-avocado-light;8;448;512;64;64
+		phosphor-avocado-thin;8;512;512;64;64
+		phosphor-avocado;8;576;512;64;64
+		phosphor-axe-bold;8;640;512;64;64
+		phosphor-axe-duotone;8;704;512;64;64
+		phosphor-axe-fill;8;768;512;64;64
+		phosphor-axe-light;8;832;512;64;64
+		phosphor-axe-thin;8;896;512;64;64
+		phosphor-axe;8;960;512;64;64
+		phosphor-baby-bold;8;0;576;64;64
+		phosphor-baby-carriage-bold;8;64;576;64;64
+		phosphor-baby-carriage-duotone;8;128;576;64;64
+		phosphor-baby-carriage-fill;8;192;576;64;64
+		phosphor-baby-carriage-light;8;256;576;64;64
+		phosphor-baby-carriage-thin;8;320;576;64;64
+		phosphor-baby-carriage;8;384;576;64;64
+		phosphor-baby-duotone;8;448;576;64;64
+		phosphor-baby-fill;8;512;576;64;64
+		phosphor-baby-light;8;576;576;64;64
+		phosphor-baby-thin;8;640;576;64;64
+		phosphor-baby;8;704;576;64;64
+		phosphor-backpack-bold;8;768;576;64;64
+		phosphor-backpack-duotone;8;832;576;64;64
+		phosphor-backpack-fill;8;896;576;64;64
+		phosphor-backpack-light;8;960;576;64;64
+		phosphor-backpack-thin;8;0;640;64;64
+		phosphor-backpack;8;64;640;64;64
+		phosphor-backspace-bold;8;128;640;64;64
+		phosphor-backspace-duotone;8;192;640;64;64
+		phosphor-backspace-fill;8;256;640;64;64
+		phosphor-backspace-light;8;320;640;64;64
+		phosphor-backspace-thin;8;384;640;64;64
+		phosphor-backspace;8;448;640;64;64
+		phosphor-bag-bold;8;512;640;64;64
+		phosphor-bag-duotone;8;576;640;64;64
+		phosphor-bag-fill;8;640;640;64;64
+		phosphor-bag-light;8;704;640;64;64
+		phosphor-bag-simple-bold;8;768;640;64;64
+		phosphor-bag-simple-duotone;8;832;640;64;64
+		phosphor-bag-simple-fill;8;896;640;64;64
+		phosphor-bag-simple-light;8;960;640;64;64
+		phosphor-bag-simple-thin;8;0;704;64;64
+		phosphor-bag-simple;8;64;704;64;64
+		phosphor-bag-thin;8;128;704;64;64
+		phosphor-bag;8;192;704;64;64
+		phosphor-balloon-bold;8;256;704;64;64
+		phosphor-balloon-duotone;8;320;704;64;64
+		phosphor-balloon-fill;8;384;704;64;64
+		phosphor-balloon-light;8;448;704;64;64
+		phosphor-balloon-thin;8;512;704;64;64
+		phosphor-balloon;8;576;704;64;64
+		phosphor-bandaids-bold;8;640;704;64;64
+		phosphor-bandaids-duotone;8;704;704;64;64
+		phosphor-bandaids-fill;8;768;704;64;64
+		phosphor-bandaids-light;8;832;704;64;64
+		phosphor-bandaids-thin;8;896;704;64;64
+		phosphor-bandaids;8;960;704;64;64
+		phosphor-bank-bold;8;0;768;64;64
+		phosphor-bank-duotone;8;64;768;64;64
+		phosphor-bank-fill;8;128;768;64;64
+		phosphor-bank-light;8;192;768;64;64
+		phosphor-bank-thin;8;256;768;64;64
+		phosphor-bank;8;320;768;64;64
+		phosphor-barbell-bold;8;384;768;64;64
+		phosphor-barbell-duotone;8;448;768;64;64
+		phosphor-barbell-fill;8;512;768;64;64
+		phosphor-barbell-light;8;576;768;64;64
+		phosphor-barbell-thin;8;640;768;64;64
+		phosphor-barbell;8;704;768;64;64
+		phosphor-barcode-bold;8;768;768;64;64
+		phosphor-barcode-duotone;8;832;768;64;64
+		phosphor-barcode-fill;8;896;768;64;64
+		phosphor-barcode-light;8;960;768;64;64
+		phosphor-barcode-thin;8;0;832;64;64
+		phosphor-barcode;8;64;832;64;64
+		phosphor-barn-bold;8;128;832;64;64
+		phosphor-barn-duotone;8;192;832;64;64
+		phosphor-barn-fill;8;256;832;64;64
+		phosphor-barn-light;8;320;832;64;64
+		phosphor-barn-thin;8;384;832;64;64
+		phosphor-barn;8;448;832;64;64
+		phosphor-barricade-bold;8;512;832;64;64
+		phosphor-barricade-duotone;8;576;832;64;64
+		phosphor-barricade-fill;8;640;832;64;64
+		phosphor-barricade-light;8;704;832;64;64
+		phosphor-barricade-thin;8;768;832;64;64
+		phosphor-barricade;8;832;832;64;64
+		phosphor-baseball-bold;8;896;832;64;64
+		phosphor-baseball-cap-bold;8;960;832;64;64
+		phosphor-baseball-cap-duotone;8;0;896;64;64
+		phosphor-baseball-cap-fill;8;64;896;64;64
+		phosphor-baseball-cap-light;8;128;896;64;64
+		phosphor-baseball-cap-thin;8;192;896;64;64
+		phosphor-baseball-cap;8;256;896;64;64
+		phosphor-baseball-duotone;8;320;896;64;64
+		phosphor-baseball-fill;8;384;896;64;64
+		phosphor-baseball-helmet-bold;8;448;896;64;64
+		phosphor-baseball-helmet-duotone;8;512;896;64;64
+		phosphor-baseball-helmet-fill;8;576;896;64;64
+		phosphor-baseball-helmet-light;8;640;896;64;64
+		phosphor-baseball-helmet-thin;8;704;896;64;64
+		phosphor-baseball-helmet;8;768;896;64;64
+		phosphor-baseball-light;8;832;896;64;64
+		phosphor-baseball-thin;8;896;896;64;64
+		phosphor-baseball;8;960;896;64;64
+		phosphor-basket-bold;8;0;960;64;64
+		phosphor-basket-duotone;8;64;960;64;64
+		phosphor-basket-fill;8;128;960;64;64
+		phosphor-basket-light;8;192;960;64;64
+		phosphor-basket-thin;8;256;960;64;64
+		phosphor-basket;8;320;960;64;64
+		phosphor-basketball-bold;8;384;960;64;64
+		phosphor-basketball-duotone;8;448;960;64;64
+		phosphor-basketball-fill;8;512;960;64;64
+		phosphor-basketball-light;8;576;960;64;64
+		phosphor-basketball-thin;8;640;960;64;64
+		phosphor-basketball;8;704;960;64;64
+		phosphor-bathtub-bold;8;768;960;64;64
+		phosphor-bathtub-duotone;8;832;960;64;64
+		phosphor-bathtub-fill;8;896;960;64;64
+		phosphor-bathtub-light;8;960;960;64;64
+		phosphor-bathtub-thin;9;0;0;64;64
+		phosphor-bathtub;9;64;0;64;64
+		phosphor-battery-charging-bold;9;128;0;64;64
+		phosphor-battery-charging-duotone;9;192;0;64;64
+		phosphor-battery-charging-fill;9;256;0;64;64
+		phosphor-battery-charging-light;9;320;0;64;64
+		phosphor-battery-charging-thin;9;384;0;64;64
+		phosphor-battery-charging-vertical-bold;9;448;0;64;64
+		phosphor-battery-charging-vertical-duotone;9;512;0;64;64
+		phosphor-battery-charging-vertical-fill;9;576;0;64;64
+		phosphor-battery-charging-vertical-light;9;640;0;64;64
+		phosphor-battery-charging-vertical-thin;9;704;0;64;64
+		phosphor-battery-charging-vertical;9;768;0;64;64
+		phosphor-battery-charging;9;832;0;64;64
+		phosphor-battery-empty-bold;9;896;0;64;64
+		phosphor-battery-empty-duotone;9;960;0;64;64
+		phosphor-battery-empty-fill;9;0;64;64;64
+		phosphor-battery-empty-light;9;64;64;64;64
+		phosphor-battery-empty-thin;9;128;64;64;64
+		phosphor-battery-empty;9;192;64;64;64
+		phosphor-battery-full-bold;9;256;64;64;64
+		phosphor-battery-full-duotone;9;320;64;64;64
+		phosphor-battery-full-fill;9;384;64;64;64
+		phosphor-battery-full-light;9;448;64;64;64
+		phosphor-battery-full-thin;9;512;64;64;64
+		phosphor-battery-full;9;576;64;64;64
+		phosphor-battery-high-bold;9;640;64;64;64
+		phosphor-battery-high-duotone;9;704;64;64;64
+		phosphor-battery-high-fill;9;768;64;64;64
+		phosphor-battery-high-light;9;832;64;64;64
+		phosphor-battery-high-thin;9;896;64;64;64
+		phosphor-battery-high;9;960;64;64;64
+		phosphor-battery-low-bold;9;0;128;64;64
+		phosphor-battery-low-duotone;9;64;128;64;64
+		phosphor-battery-low-fill;9;128;128;64;64
+		phosphor-battery-low-light;9;192;128;64;64
+		phosphor-battery-low-thin;9;256;128;64;64
+		phosphor-battery-low;9;320;128;64;64
+		phosphor-battery-medium-bold;9;384;128;64;64
+		phosphor-battery-medium-duotone;9;448;128;64;64
+		phosphor-battery-medium-fill;9;512;128;64;64
+		phosphor-battery-medium-light;9;576;128;64;64
+		phosphor-battery-medium-thin;9;640;128;64;64
+		phosphor-battery-medium;9;704;128;64;64
+		phosphor-battery-plus-bold;9;768;128;64;64
+		phosphor-battery-plus-duotone;9;832;128;64;64
+		phosphor-battery-plus-fill;9;896;128;64;64
+		phosphor-battery-plus-light;9;960;128;64;64
+		phosphor-battery-plus-thin;9;0;192;64;64
+		phosphor-battery-plus-vertical-bold;9;64;192;64;64
+		phosphor-battery-plus-vertical-duotone;9;128;192;64;64
+		phosphor-battery-plus-vertical-fill;9;192;192;64;64
+		phosphor-battery-plus-vertical-light;9;256;192;64;64
+		phosphor-battery-plus-vertical-thin;9;320;192;64;64
+		phosphor-battery-plus-vertical;9;384;192;64;64
+		phosphor-battery-plus;9;448;192;64;64
+		phosphor-battery-vertical-empty-bold;9;512;192;64;64
+		phosphor-battery-vertical-empty-duotone;9;576;192;64;64
+		phosphor-battery-vertical-empty-fill;9;640;192;64;64
+		phosphor-battery-vertical-empty-light;9;704;192;64;64
+		phosphor-battery-vertical-empty-thin;9;768;192;64;64
+		phosphor-battery-vertical-empty;9;832;192;64;64
+		phosphor-battery-vertical-full-bold;9;896;192;64;64
+		phosphor-battery-vertical-full-duotone;9;960;192;64;64
+		phosphor-battery-vertical-full-fill;9;0;256;64;64
+		phosphor-battery-vertical-full-light;9;64;256;64;64
+		phosphor-battery-vertical-full-thin;9;128;256;64;64
+		phosphor-battery-vertical-full;9;192;256;64;64
+		phosphor-battery-vertical-high-bold;9;256;256;64;64
+		phosphor-battery-vertical-high-duotone;9;320;256;64;64
+		phosphor-battery-vertical-high-fill;9;384;256;64;64
+		phosphor-battery-vertical-high-light;9;448;256;64;64
+		phosphor-battery-vertical-high-thin;9;512;256;64;64
+		phosphor-battery-vertical-high;9;576;256;64;64
+		phosphor-battery-vertical-low-bold;9;640;256;64;64
+		phosphor-battery-vertical-low-duotone;9;704;256;64;64
+		phosphor-battery-vertical-low-fill;9;768;256;64;64
+		phosphor-battery-vertical-low-light;9;832;256;64;64
+		phosphor-battery-vertical-low-thin;9;896;256;64;64
+		phosphor-battery-vertical-low;9;960;256;64;64
+		phosphor-battery-vertical-medium-bold;9;0;320;64;64
+		phosphor-battery-vertical-medium-duotone;9;64;320;64;64
+		phosphor-battery-vertical-medium-fill;9;128;320;64;64
+		phosphor-battery-vertical-medium-light;9;192;320;64;64
+		phosphor-battery-vertical-medium-thin;9;256;320;64;64
+		phosphor-battery-vertical-medium;9;320;320;64;64
+		phosphor-battery-warning-bold;9;384;320;64;64
+		phosphor-battery-warning-duotone;9;448;320;64;64
+		phosphor-battery-warning-fill;9;512;320;64;64
+		phosphor-battery-warning-light;9;576;320;64;64
+		phosphor-battery-warning-thin;9;640;320;64;64
+		phosphor-battery-warning-vertical-bold;9;704;320;64;64
+		phosphor-battery-warning-vertical-duotone;9;768;320;64;64
+		phosphor-battery-warning-vertical-fill;9;832;320;64;64
+		phosphor-battery-warning-vertical-light;9;896;320;64;64
+		phosphor-battery-warning-vertical-thin;9;960;320;64;64
+		phosphor-battery-warning-vertical;9;0;384;64;64
+		phosphor-battery-warning;9;64;384;64;64
+		phosphor-beach-ball-bold;9;128;384;64;64
+		phosphor-beach-ball-duotone;9;192;384;64;64
+		phosphor-beach-ball-fill;9;256;384;64;64
+		phosphor-beach-ball-light;9;320;384;64;64
+		phosphor-beach-ball-thin;9;384;384;64;64
+		phosphor-beach-ball;9;448;384;64;64
+		phosphor-beanie-bold;9;512;384;64;64
+		phosphor-beanie-duotone;9;576;384;64;64
+		phosphor-beanie-fill;9;640;384;64;64
+		phosphor-beanie-light;9;704;384;64;64
+		phosphor-beanie-thin;9;768;384;64;64
+		phosphor-beanie;9;832;384;64;64
+		phosphor-bed-bold;9;896;384;64;64
+		phosphor-bed-duotone;9;960;384;64;64
+		phosphor-bed-fill;9;0;448;64;64
+		phosphor-bed-light;9;64;448;64;64
+		phosphor-bed-thin;9;128;448;64;64
+		phosphor-bed;9;192;448;64;64
+		phosphor-beer-bottle-bold;9;256;448;64;64
+		phosphor-beer-bottle-duotone;9;320;448;64;64
+		phosphor-beer-bottle-fill;9;384;448;64;64
+		phosphor-beer-bottle-light;9;448;448;64;64
+		phosphor-beer-bottle-thin;9;512;448;64;64
+		phosphor-beer-bottle;9;576;448;64;64
+		phosphor-beer-stein-bold;9;640;448;64;64
+		phosphor-beer-stein-duotone;9;704;448;64;64
+		phosphor-beer-stein-fill;9;768;448;64;64
+		phosphor-beer-stein-light;9;832;448;64;64
+		phosphor-beer-stein-thin;9;896;448;64;64
+		phosphor-beer-stein;9;960;448;64;64
+		phosphor-behance-logo-bold;9;0;512;64;64
+		phosphor-behance-logo-duotone;9;64;512;64;64
+		phosphor-behance-logo-fill;9;128;512;64;64
+		phosphor-behance-logo-light;9;192;512;64;64
+		phosphor-behance-logo-thin;9;256;512;64;64
+		phosphor-behance-logo;9;320;512;64;64
+		phosphor-bell-bold;9;384;512;64;64
+		phosphor-bell-duotone;9;448;512;64;64
+		phosphor-bell-fill;9;512;512;64;64
+		phosphor-bell-light;9;576;512;64;64
+		phosphor-bell-ringing-bold;9;640;512;64;64
+		phosphor-bell-ringing-duotone;9;704;512;64;64
+		phosphor-bell-ringing-fill;9;768;512;64;64
+		phosphor-bell-ringing-light;9;832;512;64;64
+		phosphor-bell-ringing-thin;9;896;512;64;64
+		phosphor-bell-ringing;9;960;512;64;64
+		phosphor-bell-simple-bold;9;0;576;64;64
+		phosphor-bell-simple-duotone;9;64;576;64;64
+		phosphor-bell-simple-fill;9;128;576;64;64
+		phosphor-bell-simple-light;9;192;576;64;64
+		phosphor-bell-simple-ringing-bold;9;256;576;64;64
+		phosphor-bell-simple-ringing-duotone;9;320;576;64;64
+		phosphor-bell-simple-ringing-fill;9;384;576;64;64
+		phosphor-bell-simple-ringing-light;9;448;576;64;64
+		phosphor-bell-simple-ringing-thin;9;512;576;64;64
+		phosphor-bell-simple-ringing;9;576;576;64;64
+		phosphor-bell-simple-slash-bold;9;640;576;64;64
+		phosphor-bell-simple-slash-duotone;9;704;576;64;64
+		phosphor-bell-simple-slash-fill;9;768;576;64;64
+		phosphor-bell-simple-slash-light;9;832;576;64;64
+		phosphor-bell-simple-slash-thin;9;896;576;64;64
+		phosphor-bell-simple-slash;9;960;576;64;64
+		phosphor-bell-simple-thin;9;0;640;64;64
+		phosphor-bell-simple-z-bold;9;64;640;64;64
+		phosphor-bell-simple-z-duotone;9;128;640;64;64
+		phosphor-bell-simple-z-fill;9;192;640;64;64
+		phosphor-bell-simple-z-light;9;256;640;64;64
+		phosphor-bell-simple-z-thin;9;320;640;64;64
+		phosphor-bell-simple-z;9;384;640;64;64
+		phosphor-bell-simple;9;448;640;64;64
+		phosphor-bell-slash-bold;9;512;640;64;64
+		phosphor-bell-slash-duotone;9;576;640;64;64
+		phosphor-bell-slash-fill;9;640;640;64;64
+		phosphor-bell-slash-light;9;704;640;64;64
+		phosphor-bell-slash-thin;9;768;640;64;64
+		phosphor-bell-slash;9;832;640;64;64
+		phosphor-bell-thin;9;896;640;64;64
+		phosphor-bell-z-bold;9;960;640;64;64
+		phosphor-bell-z-duotone;9;0;704;64;64
+		phosphor-bell-z-fill;9;64;704;64;64
+		phosphor-bell-z-light;9;128;704;64;64
+		phosphor-bell-z-thin;9;192;704;64;64
+		phosphor-bell-z;9;256;704;64;64
+		phosphor-bell;9;320;704;64;64
+		phosphor-belt-bold;9;384;704;64;64
+		phosphor-belt-duotone;9;448;704;64;64
+		phosphor-belt-fill;9;512;704;64;64
+		phosphor-belt-light;9;576;704;64;64
+		phosphor-belt-thin;9;640;704;64;64
+		phosphor-belt;9;704;704;64;64
+		phosphor-bezier-curve-bold;9;768;704;64;64
+		phosphor-bezier-curve-duotone;9;832;704;64;64
+		phosphor-bezier-curve-fill;9;896;704;64;64
+		phosphor-bezier-curve-light;9;960;704;64;64
+		phosphor-bezier-curve-thin;9;0;768;64;64
+		phosphor-bezier-curve;9;64;768;64;64
+		phosphor-bicycle-bold;9;128;768;64;64
+		phosphor-bicycle-duotone;9;192;768;64;64
+		phosphor-bicycle-fill;9;256;768;64;64
+		phosphor-bicycle-light;9;320;768;64;64
+		phosphor-bicycle-thin;9;384;768;64;64
+		phosphor-bicycle;9;448;768;64;64
+		phosphor-binary-bold;9;512;768;64;64
+		phosphor-binary-duotone;9;576;768;64;64
+		phosphor-binary-fill;9;640;768;64;64
+		phosphor-binary-light;9;704;768;64;64
+		phosphor-binary-thin;9;768;768;64;64
+		phosphor-binary;9;832;768;64;64
+		phosphor-binoculars-bold;9;896;768;64;64
+		phosphor-binoculars-duotone;9;960;768;64;64
+		phosphor-binoculars-fill;9;0;832;64;64
+		phosphor-binoculars-light;9;64;832;64;64
+		phosphor-binoculars-thin;9;128;832;64;64
+		phosphor-binoculars;9;192;832;64;64
+		phosphor-biohazard-bold;9;256;832;64;64
+		phosphor-biohazard-duotone;9;320;832;64;64
+		phosphor-biohazard-fill;9;384;832;64;64
+		phosphor-biohazard-light;9;448;832;64;64
+		phosphor-biohazard-thin;9;512;832;64;64
+		phosphor-biohazard;9;576;832;64;64
+		phosphor-bird-bold;9;640;832;64;64
+		phosphor-bird-duotone;9;704;832;64;64
+		phosphor-bird-fill;9;768;832;64;64
+		phosphor-bird-light;9;832;832;64;64
+		phosphor-bird-thin;9;896;832;64;64
+		phosphor-bird;9;960;832;64;64
+		phosphor-blueprint-bold;9;0;896;64;64
+		phosphor-blueprint-duotone;9;64;896;64;64
+		phosphor-blueprint-fill;9;128;896;64;64
+		phosphor-blueprint-light;9;192;896;64;64
+		phosphor-blueprint-thin;9;256;896;64;64
+		phosphor-blueprint;9;320;896;64;64
+		phosphor-bluetooth-bold;9;384;896;64;64
+		phosphor-bluetooth-connected-bold;9;448;896;64;64
+		phosphor-bluetooth-connected-duotone;9;512;896;64;64
+		phosphor-bluetooth-connected-fill;9;576;896;64;64
+		phosphor-bluetooth-connected-light;9;640;896;64;64
+		phosphor-bluetooth-connected-thin;9;704;896;64;64
+		phosphor-bluetooth-connected;9;768;896;64;64
+		phosphor-bluetooth-duotone;9;832;896;64;64
+		phosphor-bluetooth-fill;9;896;896;64;64
+		phosphor-bluetooth-light;9;960;896;64;64
+		phosphor-bluetooth-slash-bold;9;0;960;64;64
+		phosphor-bluetooth-slash-duotone;9;64;960;64;64
+		phosphor-bluetooth-slash-fill;9;128;960;64;64
+		phosphor-bluetooth-slash-light;9;192;960;64;64
+		phosphor-bluetooth-slash-thin;9;256;960;64;64
+		phosphor-bluetooth-slash;9;320;960;64;64
+		phosphor-bluetooth-thin;9;384;960;64;64
+		phosphor-bluetooth-x-bold;9;448;960;64;64
+		phosphor-bluetooth-x-duotone;9;512;960;64;64
+		phosphor-bluetooth-x-fill;9;576;960;64;64
+		phosphor-bluetooth-x-light;9;640;960;64;64
+		phosphor-bluetooth-x-thin;9;704;960;64;64
+		phosphor-bluetooth-x;9;768;960;64;64
+		phosphor-bluetooth;9;832;960;64;64
+		phosphor-boat-bold;9;896;960;64;64
+		phosphor-boat-duotone;9;960;960;64;64
+		phosphor-boat-fill;10;0;0;64;64
+		phosphor-boat-light;10;64;0;64;64
+		phosphor-boat-thin;10;128;0;64;64
+		phosphor-boat;10;192;0;64;64
+		phosphor-bomb-bold;10;256;0;64;64
+		phosphor-bomb-duotone;10;320;0;64;64
+		phosphor-bomb-fill;10;384;0;64;64
+		phosphor-bomb-light;10;448;0;64;64
+		phosphor-bomb-thin;10;512;0;64;64
+		phosphor-bomb;10;576;0;64;64
+		phosphor-bone-bold;10;640;0;64;64
+		phosphor-bone-duotone;10;704;0;64;64
+		phosphor-bone-fill;10;768;0;64;64
+		phosphor-bone-light;10;832;0;64;64
+		phosphor-bone-thin;10;896;0;64;64
+		phosphor-bone;10;960;0;64;64
+		phosphor-book-bold;10;0;64;64;64
+		phosphor-book-bookmark-bold;10;64;64;64;64
+		phosphor-book-bookmark-duotone;10;128;64;64;64
+		phosphor-book-bookmark-fill;10;192;64;64;64
+		phosphor-book-bookmark-light;10;256;64;64;64
+		phosphor-book-bookmark-thin;10;320;64;64;64
+		phosphor-book-bookmark;10;384;64;64;64
+		phosphor-book-duotone;10;448;64;64;64
+		phosphor-book-fill;10;512;64;64;64
+		phosphor-book-light;10;576;64;64;64
+		phosphor-book-open-bold;10;640;64;64;64
+		phosphor-book-open-duotone;10;704;64;64;64
+		phosphor-book-open-fill;10;768;64;64;64
+		phosphor-book-open-light;10;832;64;64;64
+		phosphor-book-open-text-bold;10;896;64;64;64
+		phosphor-book-open-text-duotone;10;960;64;64;64
+		phosphor-book-open-text-fill;10;0;128;64;64
+		phosphor-book-open-text-light;10;64;128;64;64
+		phosphor-book-open-text-thin;10;128;128;64;64
+		phosphor-book-open-text;10;192;128;64;64
+		phosphor-book-open-thin;10;256;128;64;64
+		phosphor-book-open-user-bold;10;320;128;64;64
+		phosphor-book-open-user-duotone;10;384;128;64;64
+		phosphor-book-open-user-fill;10;448;128;64;64
+		phosphor-book-open-user-light;10;512;128;64;64
+		phosphor-book-open;10;576;128;64;64
+		phosphor-book-thin;10;640;128;64;64
+		phosphor-book-user-thin;10;704;128;64;64
+		phosphor-book-user;10;768;128;64;64
+		phosphor-book;10;832;128;64;64
+		phosphor-bookmark-bold;10;896;128;64;64
+		phosphor-bookmark-duotone;10;960;128;64;64
+		phosphor-bookmark-fill;10;0;192;64;64
+		phosphor-bookmark-light;10;64;192;64;64
+		phosphor-bookmark-simple-bold;10;128;192;64;64
+		phosphor-bookmark-simple-duotone;10;192;192;64;64
+		phosphor-bookmark-simple-fill;10;256;192;64;64
+		phosphor-bookmark-simple-light;10;320;192;64;64
+		phosphor-bookmark-simple-thin;10;384;192;64;64
+		phosphor-bookmark-simple;10;448;192;64;64
+		phosphor-bookmark-thin;10;512;192;64;64
+		phosphor-bookmark;10;576;192;64;64
+		phosphor-bookmarks-bold;10;640;192;64;64
+		phosphor-bookmarks-duotone;10;704;192;64;64
+		phosphor-bookmarks-fill;10;768;192;64;64
+		phosphor-bookmarks-light;10;832;192;64;64
+		phosphor-bookmarks-simple-bold;10;896;192;64;64
+		phosphor-bookmarks-simple-duotone;10;960;192;64;64
+		phosphor-bookmarks-simple-fill;10;0;256;64;64
+		phosphor-bookmarks-simple-light;10;64;256;64;64
+		phosphor-bookmarks-simple-thin;10;128;256;64;64
+		phosphor-bookmarks-simple;10;192;256;64;64
+		phosphor-bookmarks-thin;10;256;256;64;64
+		phosphor-bookmarks;10;320;256;64;64
+		phosphor-books-bold;10;384;256;64;64
+		phosphor-books-duotone;10;448;256;64;64
+		phosphor-books-fill;10;512;256;64;64
+		phosphor-books-light;10;576;256;64;64
+		phosphor-books-thin;10;640;256;64;64
+		phosphor-books;10;704;256;64;64
+		phosphor-boot-bold;10;768;256;64;64
+		phosphor-boot-duotone;10;832;256;64;64
+		phosphor-boot-fill;10;896;256;64;64
+		phosphor-boot-light;10;960;256;64;64
+		phosphor-boot-thin;10;0;320;64;64
+		phosphor-boot;10;64;320;64;64
+		phosphor-boules-bold;10;128;320;64;64
+		phosphor-boules-duotone;10;192;320;64;64
+		phosphor-boules-fill;10;256;320;64;64
+		phosphor-boules-light;10;320;320;64;64
+		phosphor-boules-thin;10;384;320;64;64
+		phosphor-boules;10;448;320;64;64
+		phosphor-bounding-box-bold;10;512;320;64;64
+		phosphor-bounding-box-duotone;10;576;320;64;64
+		phosphor-bounding-box-fill;10;640;320;64;64
+		phosphor-bounding-box-light;10;704;320;64;64
+		phosphor-bounding-box-thin;10;768;320;64;64
+		phosphor-bounding-box;10;832;320;64;64
+		phosphor-bowl-food-bold;10;896;320;64;64
+		phosphor-bowl-food-duotone;10;960;320;64;64
+		phosphor-bowl-food-fill;10;0;384;64;64
+		phosphor-bowl-food-light;10;64;384;64;64
+		phosphor-bowl-food-thin;10;128;384;64;64
+		phosphor-bowl-food;10;192;384;64;64
+		phosphor-bowl-steam-bold;10;256;384;64;64
+		phosphor-bowl-steam-duotone;10;320;384;64;64
+		phosphor-bowl-steam-fill;10;384;384;64;64
+		phosphor-bowl-steam-light;10;448;384;64;64
+		phosphor-bowl-steam-thin;10;512;384;64;64
+		phosphor-bowl-steam;10;576;384;64;64
+		phosphor-bowling-ball-bold;10;640;384;64;64
+		phosphor-bowling-ball-duotone;10;704;384;64;64
+		phosphor-bowling-ball-fill;10;768;384;64;64
+		phosphor-bowling-ball-light;10;832;384;64;64
+		phosphor-bowling-ball-thin;10;896;384;64;64
+		phosphor-bowling-ball;10;960;384;64;64
+		phosphor-box-arrow-down-bold;10;0;448;64;64
+		phosphor-box-arrow-down-duotone;10;64;448;64;64
+		phosphor-box-arrow-down-fill;10;128;448;64;64
+		phosphor-box-arrow-down-light;10;192;448;64;64
+		phosphor-box-arrow-down-thin;10;256;448;64;64
+		phosphor-box-arrow-down;10;320;448;64;64
+		phosphor-box-arrow-up-bold;10;384;448;64;64
+		phosphor-box-arrow-up-duotone;10;448;448;64;64
+		phosphor-box-arrow-up-fill;10;512;448;64;64
+		phosphor-box-arrow-up-light;10;576;448;64;64
+		phosphor-box-arrow-up-thin;10;640;448;64;64
+		phosphor-box-arrow-up;10;704;448;64;64
+		phosphor-boxing-glove-bold;10;768;448;64;64
+		phosphor-boxing-glove-duotone;10;832;448;64;64
+		phosphor-boxing-glove-fill;10;896;448;64;64
+		phosphor-boxing-glove-light;10;960;448;64;64
+		phosphor-boxing-glove-thin;10;0;512;64;64
+		phosphor-boxing-glove;10;64;512;64;64
+		phosphor-brackets-angle-bold;10;128;512;64;64
+		phosphor-brackets-angle-duotone;10;192;512;64;64
+		phosphor-brackets-angle-fill;10;256;512;64;64
+		phosphor-brackets-angle-light;10;320;512;64;64
+		phosphor-brackets-angle-thin;10;384;512;64;64
+		phosphor-brackets-angle;10;448;512;64;64
+		phosphor-brackets-curly-bold;10;512;512;64;64
+		phosphor-brackets-curly-duotone;10;576;512;64;64
+		phosphor-brackets-curly-fill;10;640;512;64;64
+		phosphor-brackets-curly-light;10;704;512;64;64
+		phosphor-brackets-curly-thin;10;768;512;64;64
+		phosphor-brackets-curly;10;832;512;64;64
+		phosphor-brackets-round-bold;10;896;512;64;64
+		phosphor-brackets-round-duotone;10;960;512;64;64
+		phosphor-brackets-round-fill;10;0;576;64;64
+		phosphor-brackets-round-light;10;64;576;64;64
+		phosphor-brackets-round-thin;10;128;576;64;64
+		phosphor-brackets-round;10;192;576;64;64
+		phosphor-brackets-square-bold;10;256;576;64;64
+		phosphor-brackets-square-duotone;10;320;576;64;64
+		phosphor-brackets-square-fill;10;384;576;64;64
+		phosphor-brackets-square-light;10;448;576;64;64
+		phosphor-brackets-square-thin;10;512;576;64;64
+		phosphor-brackets-square;10;576;576;64;64
+		phosphor-brain-bold;10;640;576;64;64
+		phosphor-brain-duotone;10;704;576;64;64
+		phosphor-brain-fill;10;768;576;64;64
+		phosphor-brain-light;10;832;576;64;64
+		phosphor-brain-thin;10;896;576;64;64
+		phosphor-brain;10;960;576;64;64
+		phosphor-brandy-bold;10;0;640;64;64
+		phosphor-brandy-duotone;10;64;640;64;64
+		phosphor-brandy-fill;10;128;640;64;64
+		phosphor-brandy-light;10;192;640;64;64
+		phosphor-brandy-thin;10;256;640;64;64
+		phosphor-brandy;10;320;640;64;64
+		phosphor-bread-bold;10;384;640;64;64
+		phosphor-bread-duotone;10;448;640;64;64
+		phosphor-bread-fill;10;512;640;64;64
+		phosphor-bread-light;10;576;640;64;64
+		phosphor-bread-thin;10;640;640;64;64
+		phosphor-bread;10;704;640;64;64
+		phosphor-bridge-bold;10;768;640;64;64
+		phosphor-bridge-duotone;10;832;640;64;64
+		phosphor-bridge-fill;10;896;640;64;64
+		phosphor-bridge-light;10;960;640;64;64
+		phosphor-bridge-thin;10;0;704;64;64
+		phosphor-bridge;10;64;704;64;64
+		phosphor-briefcase-bold;10;128;704;64;64
+		phosphor-briefcase-duotone;10;192;704;64;64
+		phosphor-briefcase-fill;10;256;704;64;64
+		phosphor-briefcase-light;10;320;704;64;64
+		phosphor-briefcase-metal-bold;10;384;704;64;64
+		phosphor-briefcase-metal-duotone;10;448;704;64;64
+		phosphor-briefcase-metal-fill;10;512;704;64;64
+		phosphor-briefcase-metal-light;10;576;704;64;64
+		phosphor-briefcase-metal-thin;10;640;704;64;64
+		phosphor-briefcase-metal;10;704;704;64;64
+		phosphor-briefcase-thin;10;768;704;64;64
+		phosphor-briefcase;10;832;704;64;64
+		phosphor-broadcast-bold;10;896;704;64;64
+		phosphor-broadcast-duotone;10;960;704;64;64
+		phosphor-broadcast-fill;10;0;768;64;64
+		phosphor-broadcast-light;10;64;768;64;64
+		phosphor-broadcast-thin;10;128;768;64;64
+		phosphor-broadcast;10;192;768;64;64
+		phosphor-broom-bold;10;256;768;64;64
+		phosphor-broom-duotone;10;320;768;64;64
+		phosphor-broom-fill;10;384;768;64;64
+		phosphor-broom-light;10;448;768;64;64
+		phosphor-broom-thin;10;512;768;64;64
+		phosphor-broom;10;576;768;64;64
+		phosphor-browser-bold;10;640;768;64;64
+		phosphor-browser-duotone;10;704;768;64;64
+		phosphor-browser-fill;10;768;768;64;64
+		phosphor-browser-light;10;832;768;64;64
+		phosphor-browser-thin;10;896;768;64;64
+		phosphor-browser;10;960;768;64;64
+		phosphor-browsers-bold;10;0;832;64;64
+		phosphor-browsers-duotone;10;64;832;64;64
+		phosphor-browsers-fill;10;128;832;64;64
+		phosphor-browsers-light;10;192;832;64;64
+		phosphor-browsers-thin;10;256;832;64;64
+		phosphor-browsers;10;320;832;64;64
+		phosphor-bug-beetle-bold;10;384;832;64;64
+		phosphor-bug-beetle-duotone;10;448;832;64;64
+		phosphor-bug-beetle-fill;10;512;832;64;64
+		phosphor-bug-beetle-light;10;576;832;64;64
+		phosphor-bug-beetle-thin;10;640;832;64;64
+		phosphor-bug-beetle;10;704;832;64;64
+		phosphor-bug-bold;10;768;832;64;64
+		phosphor-bug-droid-bold;10;832;832;64;64
+		phosphor-bug-droid-duotone;10;896;832;64;64
+		phosphor-bug-droid-fill;10;960;832;64;64
+		phosphor-bug-droid-light;10;0;896;64;64
+		phosphor-bug-droid-thin;10;64;896;64;64
+		phosphor-bug-droid;10;128;896;64;64
+		phosphor-bug-duotone;10;192;896;64;64
+		phosphor-bug-fill;10;256;896;64;64
+		phosphor-bug-light;10;320;896;64;64
+		phosphor-bug-thin;10;384;896;64;64
+		phosphor-bug;10;448;896;64;64
+		phosphor-building-apartment-bold;10;512;896;64;64
+		phosphor-building-apartment-duotone;10;576;896;64;64
+		phosphor-building-apartment-fill;10;640;896;64;64
+		phosphor-building-apartment-light;10;704;896;64;64
+		phosphor-building-apartment-thin;10;768;896;64;64
+		phosphor-building-apartment;10;832;896;64;64
+		phosphor-building-bold;10;896;896;64;64
+		phosphor-building-duotone;10;960;896;64;64
+		phosphor-building-fill;10;0;960;64;64
+		phosphor-building-light;10;64;960;64;64
+		phosphor-building-office-bold;10;128;960;64;64
+		phosphor-building-office-duotone;10;192;960;64;64
+		phosphor-building-office-fill;10;256;960;64;64
+		phosphor-building-office-light;10;320;960;64;64
+		phosphor-building-office-thin;10;384;960;64;64
+		phosphor-building-office;10;448;960;64;64
+		phosphor-building-thin;10;512;960;64;64
+		phosphor-building;10;576;960;64;64
+		phosphor-buildings-bold;10;640;960;64;64
+		phosphor-buildings-duotone;10;704;960;64;64
+		phosphor-buildings-fill;10;768;960;64;64
+		phosphor-buildings-light;10;832;960;64;64
+		phosphor-buildings-thin;10;896;960;64;64
+		phosphor-buildings;10;960;960;64;64
+		phosphor-bulldozer-bold;11;0;0;64;64
+		phosphor-bulldozer-duotone;11;64;0;64;64
+		phosphor-bulldozer-fill;11;128;0;64;64
+		phosphor-bulldozer-light;11;192;0;64;64
+		phosphor-bulldozer-thin;11;256;0;64;64
+		phosphor-bulldozer;11;320;0;64;64
+		phosphor-bus-bold;11;384;0;64;64
+		phosphor-bus-duotone;11;448;0;64;64
+		phosphor-bus-fill;11;512;0;64;64
+		phosphor-bus-light;11;576;0;64;64
+		phosphor-bus-thin;11;640;0;64;64
+		phosphor-bus;11;704;0;64;64
+		phosphor-butterfly-bold;11;768;0;64;64
+		phosphor-butterfly-duotone;11;832;0;64;64
+		phosphor-butterfly-fill;11;896;0;64;64
+		phosphor-butterfly-light;11;960;0;64;64
+		phosphor-butterfly-thin;11;0;64;64;64
+		phosphor-butterfly;11;64;64;64;64
+		phosphor-cable-car-bold;11;128;64;64;64
+		phosphor-cable-car-duotone;11;192;64;64;64
+		phosphor-cable-car-fill;11;256;64;64;64
+		phosphor-cable-car-light;11;320;64;64;64
+		phosphor-cable-car-thin;11;384;64;64;64
+		phosphor-cable-car;11;448;64;64;64
+		phosphor-cactus-bold;11;512;64;64;64
+		phosphor-cactus-duotone;11;576;64;64;64
+		phosphor-cactus-fill;11;640;64;64;64
+		phosphor-cactus-light;11;704;64;64;64
+		phosphor-cactus-thin;11;768;64;64;64
+		phosphor-cactus;11;832;64;64;64
+		phosphor-cake-bold;11;896;64;64;64
+		phosphor-cake-duotone;11;960;64;64;64
+		phosphor-cake-fill;11;0;128;64;64
+		phosphor-cake-light;11;64;128;64;64
+		phosphor-cake-thin;11;128;128;64;64
+		phosphor-cake;11;192;128;64;64
+		phosphor-calculator-bold;11;256;128;64;64
+		phosphor-calculator-duotone;11;320;128;64;64
+		phosphor-calculator-fill;11;384;128;64;64
+		phosphor-calculator-light;11;448;128;64;64
+		phosphor-calculator-thin;11;512;128;64;64
+		phosphor-calculator;11;576;128;64;64
+		phosphor-calendar-blank-bold;11;640;128;64;64
+		phosphor-calendar-blank-duotone;11;704;128;64;64
+		phosphor-calendar-blank-fill;11;768;128;64;64
+		phosphor-calendar-blank-light;11;832;128;64;64
+		phosphor-calendar-blank-thin;11;896;128;64;64
+		phosphor-calendar-blank;11;960;128;64;64
+		phosphor-calendar-bold;11;0;192;64;64
+		phosphor-calendar-check-bold;11;64;192;64;64
+		phosphor-calendar-check-duotone;11;128;192;64;64
+		phosphor-calendar-check-fill;11;192;192;64;64
+		phosphor-calendar-check-light;11;256;192;64;64
+		phosphor-calendar-check-thin;11;320;192;64;64
+		phosphor-calendar-check;11;384;192;64;64
+		phosphor-calendar-dot-bold;11;448;192;64;64
+		phosphor-calendar-dot-duotone;11;512;192;64;64
+		phosphor-calendar-dot-fill;11;576;192;64;64
+		phosphor-calendar-dot-light;11;640;192;64;64
+		phosphor-calendar-dot-thin;11;704;192;64;64
+		phosphor-calendar-dot;11;768;192;64;64
+		phosphor-calendar-dots-bold;11;832;192;64;64
+		phosphor-calendar-dots-duotone;11;896;192;64;64
+		phosphor-calendar-dots-fill;11;960;192;64;64
+		phosphor-calendar-dots-light;11;0;256;64;64
+		phosphor-calendar-dots-thin;11;64;256;64;64
+		phosphor-calendar-dots;11;128;256;64;64
+		phosphor-calendar-duotone;11;192;256;64;64
+		phosphor-calendar-fill;11;256;256;64;64
+		phosphor-calendar-heart-bold;11;320;256;64;64
+		phosphor-calendar-heart-duotone;11;384;256;64;64
+		phosphor-calendar-heart-fill;11;448;256;64;64
+		phosphor-calendar-heart-light;11;512;256;64;64
+		phosphor-calendar-heart-thin;11;576;256;64;64
+		phosphor-calendar-heart;11;640;256;64;64
+		phosphor-calendar-light;11;704;256;64;64
+		phosphor-calendar-minus-bold;11;768;256;64;64
+		phosphor-calendar-minus-duotone;11;832;256;64;64
+		phosphor-calendar-minus-fill;11;896;256;64;64
+		phosphor-calendar-minus-light;11;960;256;64;64
+		phosphor-calendar-minus-thin;11;0;320;64;64
+		phosphor-calendar-minus;11;64;320;64;64
+		phosphor-calendar-plus-bold;11;128;320;64;64
+		phosphor-calendar-plus-duotone;11;192;320;64;64
+		phosphor-calendar-plus-fill;11;256;320;64;64
+		phosphor-calendar-plus-light;11;320;320;64;64
+		phosphor-calendar-plus-thin;11;384;320;64;64
+		phosphor-calendar-plus;11;448;320;64;64
+		phosphor-calendar-slash-bold;11;512;320;64;64
+		phosphor-calendar-slash-duotone;11;576;320;64;64
+		phosphor-calendar-slash-fill;11;640;320;64;64
+		phosphor-calendar-slash-light;11;704;320;64;64
+		phosphor-calendar-slash-thin;11;768;320;64;64
+		phosphor-calendar-slash;11;832;320;64;64
+		phosphor-calendar-star-bold;11;896;320;64;64
+		phosphor-calendar-star-duotone;11;960;320;64;64
+		phosphor-calendar-star-fill;11;0;384;64;64
+		phosphor-calendar-star-light;11;64;384;64;64
+		phosphor-calendar-star-thin;11;128;384;64;64
+		phosphor-calendar-star;11;192;384;64;64
+		phosphor-calendar-thin;11;256;384;64;64
+		phosphor-calendar-x-bold;11;320;384;64;64
+		phosphor-calendar-x-duotone;11;384;384;64;64
+		phosphor-calendar-x-fill;11;448;384;64;64
+		phosphor-calendar-x-light;11;512;384;64;64
+		phosphor-calendar-x-thin;11;576;384;64;64
+		phosphor-calendar-x;11;640;384;64;64
+		phosphor-calendar;11;704;384;64;64
+		phosphor-call-bell-bold;11;768;384;64;64
+		phosphor-call-bell-duotone;11;832;384;64;64
+		phosphor-call-bell-fill;11;896;384;64;64
+		phosphor-call-bell-light;11;960;384;64;64
+		phosphor-call-bell-thin;11;0;448;64;64
+		phosphor-call-bell;11;64;448;64;64
+		phosphor-camera-bold;11;128;448;64;64
+		phosphor-camera-duotone;11;192;448;64;64
+		phosphor-camera-fill;11;256;448;64;64
+		phosphor-camera-light;11;320;448;64;64
+		phosphor-camera-plus-bold;11;384;448;64;64
+		phosphor-camera-plus-duotone;11;448;448;64;64
+		phosphor-camera-plus-fill;11;512;448;64;64
+		phosphor-camera-plus-light;11;576;448;64;64
+		phosphor-camera-plus-thin;11;640;448;64;64
+		phosphor-camera-plus;11;704;448;64;64
+		phosphor-camera-rotate-bold;11;768;448;64;64
+		phosphor-camera-rotate-duotone;11;832;448;64;64
+		phosphor-camera-rotate-fill;11;896;448;64;64
+		phosphor-camera-rotate-light;11;960;448;64;64
+		phosphor-camera-rotate-thin;11;0;512;64;64
+		phosphor-camera-rotate;11;64;512;64;64
+		phosphor-camera-slash-bold;11;128;512;64;64
+		phosphor-camera-slash-duotone;11;192;512;64;64
+		phosphor-camera-slash-fill;11;256;512;64;64
+		phosphor-camera-slash-light;11;320;512;64;64
+		phosphor-camera-slash-thin;11;384;512;64;64
+		phosphor-camera-slash;11;448;512;64;64
+		phosphor-camera-thin;11;512;512;64;64
+		phosphor-camera;11;576;512;64;64
+		phosphor-campfire-bold;11;640;512;64;64
+		phosphor-campfire-duotone;11;704;512;64;64
+		phosphor-campfire-fill;11;768;512;64;64
+		phosphor-campfire-light;11;832;512;64;64
+		phosphor-campfire-thin;11;896;512;64;64
+		phosphor-campfire;11;960;512;64;64
+		phosphor-car-battery-bold;11;0;576;64;64
+		phosphor-car-battery-duotone;11;64;576;64;64
+		phosphor-car-battery-fill;11;128;576;64;64
+		phosphor-car-battery-light;11;192;576;64;64
+		phosphor-car-battery-thin;11;256;576;64;64
+		phosphor-car-battery;11;320;576;64;64
+		phosphor-car-bold;11;384;576;64;64
+		phosphor-car-duotone;11;448;576;64;64
+		phosphor-car-fill;11;512;576;64;64
+		phosphor-car-light;11;576;576;64;64
+		phosphor-car-profile-bold;11;640;576;64;64
+		phosphor-car-profile-duotone;11;704;576;64;64
+		phosphor-car-profile-fill;11;768;576;64;64
+		phosphor-car-profile-light;11;832;576;64;64
+		phosphor-car-profile-thin;11;896;576;64;64
+		phosphor-car-profile;11;960;576;64;64
+		phosphor-car-simple-bold;11;0;640;64;64
+		phosphor-car-simple-duotone;11;64;640;64;64
+		phosphor-car-simple-fill;11;128;640;64;64
+		phosphor-car-simple-light;11;192;640;64;64
+		phosphor-car-simple-thin;11;256;640;64;64
+		phosphor-car-simple;11;320;640;64;64
+		phosphor-car-thin;11;384;640;64;64
+		phosphor-car;11;448;640;64;64
+		phosphor-cardholder-bold;11;512;640;64;64
+		phosphor-cardholder-duotone;11;576;640;64;64
+		phosphor-cardholder-fill;11;640;640;64;64
+		phosphor-cardholder-light;11;704;640;64;64
+		phosphor-cardholder-thin;11;768;640;64;64
+		phosphor-cardholder;11;832;640;64;64
+		phosphor-cards-bold;11;896;640;64;64
+		phosphor-cards-duotone;11;960;640;64;64
+		phosphor-cards-fill;11;0;704;64;64
+		phosphor-cards-light;11;64;704;64;64
+		phosphor-cards-thin;11;128;704;64;64
+		phosphor-cards-three-bold;11;192;704;64;64
+		phosphor-cards-three-duotone;11;256;704;64;64
+		phosphor-cards-three-fill;11;320;704;64;64
+		phosphor-cards-three-light;11;384;704;64;64
+		phosphor-cards-three-thin;11;448;704;64;64
+		phosphor-cards-three;11;512;704;64;64
+		phosphor-cards;11;576;704;64;64
+		phosphor-caret-circle-double-down-bold;11;640;704;64;64
+		phosphor-caret-circle-double-down-duotone;11;704;704;64;64
+		phosphor-caret-circle-double-down-fill;11;768;704;64;64
+		phosphor-caret-circle-double-down-light;11;832;704;64;64
+		phosphor-caret-circle-double-down-thin;11;896;704;64;64
+		phosphor-caret-circle-double-down;11;960;704;64;64
+		phosphor-caret-circle-double-left-bold;11;0;768;64;64
+		phosphor-caret-circle-double-left-duotone;11;64;768;64;64
+		phosphor-caret-circle-double-left-fill;11;128;768;64;64
+		phosphor-caret-circle-double-left-light;11;192;768;64;64
+		phosphor-caret-circle-double-left-thin;11;256;768;64;64
+		phosphor-caret-circle-double-left;11;320;768;64;64
+		phosphor-caret-circle-double-right-bold;11;384;768;64;64
+		phosphor-caret-circle-double-right-duotone;11;448;768;64;64
+		phosphor-caret-circle-double-right-fill;11;512;768;64;64
+		phosphor-caret-circle-double-right-light;11;576;768;64;64
+		phosphor-caret-circle-double-right-thin;11;640;768;64;64
+		phosphor-caret-circle-double-right;11;704;768;64;64
+		phosphor-caret-circle-double-up-bold;11;768;768;64;64
+		phosphor-caret-circle-double-up-duotone;11;832;768;64;64
+		phosphor-caret-circle-double-up-fill;11;896;768;64;64
+		phosphor-caret-circle-double-up-light;11;960;768;64;64
+		phosphor-caret-circle-double-up-thin;11;0;832;64;64
+		phosphor-caret-circle-double-up;11;64;832;64;64
+		phosphor-caret-circle-down-bold;11;128;832;64;64
+		phosphor-caret-circle-down-duotone;11;192;832;64;64
+		phosphor-caret-circle-down-fill;11;256;832;64;64
+		phosphor-caret-circle-down-light;11;320;832;64;64
+		phosphor-caret-circle-down-thin;11;384;832;64;64
+		phosphor-caret-circle-down;11;448;832;64;64
+		phosphor-caret-circle-left-bold;11;512;832;64;64
+		phosphor-caret-circle-left-duotone;11;576;832;64;64
+		phosphor-caret-circle-left-fill;11;640;832;64;64
+		phosphor-caret-circle-left-light;11;704;832;64;64
+		phosphor-caret-circle-left-thin;11;768;832;64;64
+		phosphor-caret-circle-left;11;832;832;64;64
+		phosphor-caret-circle-right-bold;11;896;832;64;64
+		phosphor-caret-circle-right-duotone;11;960;832;64;64
+		phosphor-caret-circle-right-fill;11;0;896;64;64
+		phosphor-caret-circle-right-light;11;64;896;64;64
+		phosphor-caret-circle-right-thin;11;128;896;64;64
+		phosphor-caret-circle-right;11;192;896;64;64
+		phosphor-caret-circle-up-bold;11;256;896;64;64
+		phosphor-caret-circle-up-down-bold;11;320;896;64;64
+		phosphor-caret-circle-up-down-duotone;11;384;896;64;64
+		phosphor-caret-circle-up-down-fill;11;448;896;64;64
+		phosphor-caret-circle-up-down-light;11;512;896;64;64
+		phosphor-caret-circle-up-down-thin;11;576;896;64;64
+		phosphor-caret-circle-up-down;11;640;896;64;64
+		phosphor-caret-circle-up-duotone;11;704;896;64;64
+		phosphor-caret-circle-up-fill;11;768;896;64;64
+		phosphor-caret-circle-up-light;11;832;896;64;64
+		phosphor-caret-circle-up-thin;11;896;896;64;64
+		phosphor-caret-circle-up;11;960;896;64;64
+		phosphor-caret-double-down-bold;11;0;960;64;64
+		phosphor-caret-double-down-duotone;11;64;960;64;64
+		phosphor-caret-double-down-fill;11;128;960;64;64
+		phosphor-caret-double-down-light;11;192;960;64;64
+		phosphor-caret-double-down-thin;11;256;960;64;64
+		phosphor-caret-double-down;11;320;960;64;64
+		phosphor-caret-double-left-bold;11;384;960;64;64
+		phosphor-caret-double-left-duotone;11;448;960;64;64
+		phosphor-caret-double-left-fill;11;512;960;64;64
+		phosphor-caret-double-left-light;11;576;960;64;64
+		phosphor-caret-double-left-thin;11;640;960;64;64
+		phosphor-caret-double-left;11;704;960;64;64
+		phosphor-caret-double-right-bold;11;768;960;64;64
+		phosphor-caret-double-right-duotone;11;832;960;64;64
+		phosphor-caret-double-right-fill;11;896;960;64;64
+		phosphor-caret-double-right-light;11;960;960;64;64
+		phosphor-caret-double-right-thin;12;0;0;64;64
+		phosphor-caret-double-right;12;64;0;64;64
+		phosphor-caret-double-up-bold;12;128;0;64;64
+		phosphor-caret-double-up-duotone;12;192;0;64;64
+		phosphor-caret-double-up-fill;12;256;0;64;64
+		phosphor-caret-double-up-light;12;320;0;64;64
+		phosphor-caret-double-up-thin;12;384;0;64;64
+		phosphor-caret-double-up;12;448;0;64;64
+		phosphor-caret-down-bold;12;512;0;64;64
+		phosphor-caret-down-duotone;12;576;0;64;64
+		phosphor-caret-down-fill;12;640;0;64;64
+		phosphor-caret-down-light;12;704;0;64;64
+		phosphor-caret-down-thin;12;768;0;64;64
+		phosphor-caret-down;12;832;0;64;64
+		phosphor-caret-left-bold;12;896;0;64;64
+		phosphor-caret-left-duotone;12;960;0;64;64
+		phosphor-caret-left-fill;12;0;64;64;64
+		phosphor-caret-left-light;12;64;64;64;64
+		phosphor-caret-left-thin;12;128;64;64;64
+		phosphor-caret-left;12;192;64;64;64
+		phosphor-caret-line-down-bold;12;256;64;64;64
+		phosphor-caret-line-down-duotone;12;320;64;64;64
+		phosphor-caret-line-down-fill;12;384;64;64;64
+		phosphor-caret-line-down-light;12;448;64;64;64
+		phosphor-caret-line-down-thin;12;512;64;64;64
+		phosphor-caret-line-down;12;576;64;64;64
+		phosphor-caret-line-left-bold;12;640;64;64;64
+		phosphor-caret-line-left-duotone;12;704;64;64;64
+		phosphor-caret-line-left-fill;12;768;64;64;64
+		phosphor-caret-line-left-light;12;832;64;64;64
+		phosphor-caret-line-left-thin;12;896;64;64;64
+		phosphor-caret-line-left;12;960;64;64;64
+		phosphor-caret-line-right-bold;12;0;128;64;64
+		phosphor-caret-line-right-duotone;12;64;128;64;64
+		phosphor-caret-line-right-fill;12;128;128;64;64
+		phosphor-caret-line-right-light;12;192;128;64;64
+		phosphor-caret-line-right-thin;12;256;128;64;64
+		phosphor-caret-line-right;12;320;128;64;64
+		phosphor-caret-line-up-bold;12;384;128;64;64
+		phosphor-caret-line-up-duotone;12;448;128;64;64
+		phosphor-caret-line-up-fill;12;512;128;64;64
+		phosphor-caret-line-up-light;12;576;128;64;64
+		phosphor-caret-line-up-thin;12;640;128;64;64
+		phosphor-caret-line-up;12;704;128;64;64
+		phosphor-caret-right-bold;12;768;128;64;64
+		phosphor-caret-right-duotone;12;832;128;64;64
+		phosphor-caret-right-fill;12;896;128;64;64
+		phosphor-caret-right-light;12;960;128;64;64
+		phosphor-caret-right-thin;12;0;192;64;64
+		phosphor-caret-right;12;64;192;64;64
+		phosphor-caret-up-bold;12;128;192;64;64
+		phosphor-caret-up-down-bold;12;192;192;64;64
+		phosphor-caret-up-down-duotone;12;256;192;64;64
+		phosphor-caret-up-down-fill;12;320;192;64;64
+		phosphor-caret-up-down-light;12;384;192;64;64
+		phosphor-caret-up-down-thin;12;448;192;64;64
+		phosphor-caret-up-down;12;512;192;64;64
+		phosphor-caret-up-duotone;12;576;192;64;64
+		phosphor-caret-up-fill;12;640;192;64;64
+		phosphor-caret-up-light;12;704;192;64;64
+		phosphor-caret-up-thin;12;768;192;64;64
+		phosphor-caret-up;12;832;192;64;64
+		phosphor-carrot-bold;12;896;192;64;64
+		phosphor-carrot-duotone;12;960;192;64;64
+		phosphor-carrot-fill;12;0;256;64;64
+		phosphor-carrot-light;12;64;256;64;64
+		phosphor-carrot-thin;12;128;256;64;64
+		phosphor-carrot;12;192;256;64;64
+		phosphor-cash-register-bold;12;256;256;64;64
+		phosphor-cash-register-duotone;12;320;256;64;64
+		phosphor-cash-register-fill;12;384;256;64;64
+		phosphor-cash-register-light;12;448;256;64;64
+		phosphor-cash-register-thin;12;512;256;64;64
+		phosphor-cash-register;12;576;256;64;64
+		phosphor-cassette-tape-bold;12;640;256;64;64
+		phosphor-cassette-tape-duotone;12;704;256;64;64
+		phosphor-cassette-tape-fill;12;768;256;64;64
+		phosphor-cassette-tape-light;12;832;256;64;64
+		phosphor-cassette-tape-thin;12;896;256;64;64
+		phosphor-cassette-tape;12;960;256;64;64
+		phosphor-castle-turret-bold;12;0;320;64;64
+		phosphor-castle-turret-duotone;12;64;320;64;64
+		phosphor-castle-turret-fill;12;128;320;64;64
+		phosphor-castle-turret-light;12;192;320;64;64
+		phosphor-castle-turret-thin;12;256;320;64;64
+		phosphor-castle-turret;12;320;320;64;64
+		phosphor-cat-bold;12;384;320;64;64
+		phosphor-cat-duotone;12;448;320;64;64
+		phosphor-cat-fill;12;512;320;64;64
+		phosphor-cat-light;12;576;320;64;64
+		phosphor-cat-thin;12;640;320;64;64
+		phosphor-cat;12;704;320;64;64
+		phosphor-cell-signal-full-bold;12;768;320;64;64
+		phosphor-cell-signal-full-duotone;12;832;320;64;64
+		phosphor-cell-signal-full-fill;12;896;320;64;64
+		phosphor-cell-signal-full-light;12;960;320;64;64
+		phosphor-cell-signal-full-thin;12;0;384;64;64
+		phosphor-cell-signal-full;12;64;384;64;64
+		phosphor-cell-signal-high-bold;12;128;384;64;64
+		phosphor-cell-signal-high-duotone;12;192;384;64;64
+		phosphor-cell-signal-high-fill;12;256;384;64;64
+		phosphor-cell-signal-high-light;12;320;384;64;64
+		phosphor-cell-signal-high-thin;12;384;384;64;64
+		phosphor-cell-signal-high;12;448;384;64;64
+		phosphor-cell-signal-low-bold;12;512;384;64;64
+		phosphor-cell-signal-low-duotone;12;576;384;64;64
+		phosphor-cell-signal-low-fill;12;640;384;64;64
+		phosphor-cell-signal-low-light;12;704;384;64;64
+		phosphor-cell-signal-low-thin;12;768;384;64;64
+		phosphor-cell-signal-low;12;832;384;64;64
+		phosphor-cell-signal-medium-bold;12;896;384;64;64
+		phosphor-cell-signal-medium-duotone;12;960;384;64;64
+		phosphor-cell-signal-medium-fill;12;0;448;64;64
+		phosphor-cell-signal-medium-light;12;64;448;64;64
+		phosphor-cell-signal-medium-thin;12;128;448;64;64
+		phosphor-cell-signal-medium;12;192;448;64;64
+		phosphor-cell-signal-none-bold;12;256;448;64;64
+		phosphor-cell-signal-none-duotone;12;320;448;64;64
+		phosphor-cell-signal-none-fill;12;384;448;64;64
+		phosphor-cell-signal-none-light;12;448;448;64;64
+		phosphor-cell-signal-none-thin;12;512;448;64;64
+		phosphor-cell-signal-none;12;576;448;64;64
+		phosphor-cell-signal-slash-bold;12;640;448;64;64
+		phosphor-cell-signal-slash-duotone;12;704;448;64;64
+		phosphor-cell-signal-slash-fill;12;768;448;64;64
+		phosphor-cell-signal-slash-light;12;832;448;64;64
+		phosphor-cell-signal-slash-thin;12;896;448;64;64
+		phosphor-cell-signal-slash;12;960;448;64;64
+		phosphor-cell-signal-x-bold;12;0;512;64;64
+		phosphor-cell-signal-x-duotone;12;64;512;64;64
+		phosphor-cell-signal-x-fill;12;128;512;64;64
+		phosphor-cell-signal-x-light;12;192;512;64;64
+		phosphor-cell-signal-x-thin;12;256;512;64;64
+		phosphor-cell-signal-x;12;320;512;64;64
+		phosphor-cell-tower-bold;12;384;512;64;64
+		phosphor-cell-tower-duotone;12;448;512;64;64
+		phosphor-cell-tower-fill;12;512;512;64;64
+		phosphor-cell-tower-light;12;576;512;64;64
+		phosphor-cell-tower-thin;12;640;512;64;64
+		phosphor-cell-tower;12;704;512;64;64
+		phosphor-certificate-bold;12;768;512;64;64
+		phosphor-certificate-duotone;12;832;512;64;64
+		phosphor-certificate-fill;12;896;512;64;64
+		phosphor-certificate-light;12;960;512;64;64
+		phosphor-certificate-thin;12;0;576;64;64
+		phosphor-certificate;12;64;576;64;64
+		phosphor-chair-bold;12;128;576;64;64
+		phosphor-chair-duotone;12;192;576;64;64
+		phosphor-chair-fill;12;256;576;64;64
+		phosphor-chair-light;12;320;576;64;64
+		phosphor-chair-thin;12;384;576;64;64
+		phosphor-chair;12;448;576;64;64
+		phosphor-chalkboard-bold;12;512;576;64;64
+		phosphor-chalkboard-duotone;12;576;576;64;64
+		phosphor-chalkboard-fill;12;640;576;64;64
+		phosphor-chalkboard-light;12;704;576;64;64
+		phosphor-chalkboard-simple-bold;12;768;576;64;64
+		phosphor-chalkboard-simple-duotone;12;832;576;64;64
+		phosphor-chalkboard-simple-fill;12;896;576;64;64
+		phosphor-chalkboard-simple-light;12;960;576;64;64
+		phosphor-chalkboard-simple-thin;12;0;640;64;64
+		phosphor-chalkboard-simple;12;64;640;64;64
+		phosphor-chalkboard-teacher-bold;12;128;640;64;64
+		phosphor-chalkboard-teacher-duotone;12;192;640;64;64
+		phosphor-chalkboard-teacher-fill;12;256;640;64;64
+		phosphor-chalkboard-teacher-light;12;320;640;64;64
+		phosphor-chalkboard-teacher-thin;12;384;640;64;64
+		phosphor-chalkboard-teacher;12;448;640;64;64
+		phosphor-chalkboard-thin;12;512;640;64;64
+		phosphor-chalkboard;12;576;640;64;64
+		phosphor-champagne-bold;12;640;640;64;64
+		phosphor-champagne-duotone;12;704;640;64;64
+		phosphor-champagne-fill;12;768;640;64;64
+		phosphor-champagne-light;12;832;640;64;64
+		phosphor-champagne-thin;12;896;640;64;64
+		phosphor-champagne;12;960;640;64;64
+		phosphor-charging-station-bold;12;0;704;64;64
+		phosphor-charging-station-duotone;12;64;704;64;64
+		phosphor-charging-station-fill;12;128;704;64;64
+		phosphor-charging-station-light;12;192;704;64;64
+		phosphor-charging-station-thin;12;256;704;64;64
+		phosphor-charging-station;12;320;704;64;64
+		phosphor-chart-bar-bold;12;384;704;64;64
+		phosphor-chart-bar-duotone;12;448;704;64;64
+		phosphor-chart-bar-fill;12;512;704;64;64
+		phosphor-chart-bar-horizontal-bold;12;576;704;64;64
+		phosphor-chart-bar-horizontal-duotone;12;640;704;64;64
+		phosphor-chart-bar-horizontal-fill;12;704;704;64;64
+		phosphor-chart-bar-horizontal-light;12;768;704;64;64
+		phosphor-chart-bar-horizontal-thin;12;832;704;64;64
+		phosphor-chart-bar-horizontal;12;896;704;64;64
+		phosphor-chart-bar-light;12;960;704;64;64
+		phosphor-chart-bar-thin;12;0;768;64;64
+		phosphor-chart-bar;12;64;768;64;64
+		phosphor-chart-donut-bold;12;128;768;64;64
+		phosphor-chart-donut-duotone;12;192;768;64;64
+		phosphor-chart-donut-fill;12;256;768;64;64
+		phosphor-chart-donut-light;12;320;768;64;64
+		phosphor-chart-donut-thin;12;384;768;64;64
+		phosphor-chart-donut;12;448;768;64;64
+		phosphor-chart-line-bold;12;512;768;64;64
+		phosphor-chart-line-down-bold;12;576;768;64;64
+		phosphor-chart-line-down-duotone;12;640;768;64;64
+		phosphor-chart-line-down-fill;12;704;768;64;64
+		phosphor-chart-line-down-light;12;768;768;64;64
+		phosphor-chart-line-down-thin;12;832;768;64;64
+		phosphor-chart-line-down;12;896;768;64;64
+		phosphor-chart-line-duotone;12;960;768;64;64
+		phosphor-chart-line-fill;12;0;832;64;64
+		phosphor-chart-line-light;12;64;832;64;64
+		phosphor-chart-line-thin;12;128;832;64;64
+		phosphor-chart-line-up-bold;12;192;832;64;64
+		phosphor-chart-line-up-duotone;12;256;832;64;64
+		phosphor-chart-line-up-fill;12;320;832;64;64
+		phosphor-chart-line-up-light;12;384;832;64;64
+		phosphor-chart-line-up-thin;12;448;832;64;64
+		phosphor-chart-line-up;12;512;832;64;64
+		phosphor-chart-line;12;576;832;64;64
+		phosphor-chart-pie-bold;12;640;832;64;64
+		phosphor-chart-pie-duotone;12;704;832;64;64
+		phosphor-chart-pie-fill;12;768;832;64;64
+		phosphor-chart-pie-light;12;832;832;64;64
+		phosphor-chart-pie-slice-bold;12;896;832;64;64
+		phosphor-chart-pie-slice-duotone;12;960;832;64;64
+		phosphor-chart-pie-slice-fill;12;0;896;64;64
+		phosphor-chart-pie-slice-light;12;64;896;64;64
+		phosphor-chart-pie-slice-thin;12;128;896;64;64
+		phosphor-chart-pie-slice;12;192;896;64;64
+		phosphor-chart-pie-thin;12;256;896;64;64
+		phosphor-chart-pie;12;320;896;64;64
+		phosphor-chart-polar-bold;12;384;896;64;64
+		phosphor-chart-polar-duotone;12;448;896;64;64
+		phosphor-chart-polar-fill;12;512;896;64;64
+		phosphor-chart-polar-light;12;576;896;64;64
+		phosphor-chart-polar-thin;12;640;896;64;64
+		phosphor-chart-polar;12;704;896;64;64
+		phosphor-chart-scatter-bold;12;768;896;64;64
+		phosphor-chart-scatter-duotone;12;832;896;64;64
+		phosphor-chart-scatter-fill;12;896;896;64;64
+		phosphor-chart-scatter-light;12;960;896;64;64
+		phosphor-chart-scatter-thin;12;0;960;64;64
+		phosphor-chart-scatter;12;64;960;64;64
+		phosphor-chat-bold;12;128;960;64;64
+		phosphor-chat-centered-bold;12;192;960;64;64
+		phosphor-chat-centered-dots-bold;12;256;960;64;64
+		phosphor-chat-centered-dots-duotone;12;320;960;64;64
+		phosphor-chat-centered-dots-fill;12;384;960;64;64
+		phosphor-chat-centered-dots-light;12;448;960;64;64
+		phosphor-chat-centered-dots-thin;12;512;960;64;64
+		phosphor-chat-centered-dots;12;576;960;64;64
+		phosphor-chat-centered-duotone;12;640;960;64;64
+		phosphor-chat-centered-fill;12;704;960;64;64
+		phosphor-chat-centered-light;12;768;960;64;64
+		phosphor-chat-centered-slash-bold;12;832;960;64;64
+		phosphor-chat-centered-slash-duotone;12;896;960;64;64
+		phosphor-chat-centered-slash-fill;12;960;960;64;64
+		phosphor-chat-centered-slash-light;13;0;0;64;64
+		phosphor-chat-centered-slash-thin;13;64;0;64;64
+		phosphor-chat-centered-slash;13;128;0;64;64
+		phosphor-chat-centered-text-bold;13;192;0;64;64
+		phosphor-chat-centered-text-duotone;13;256;0;64;64
+		phosphor-chat-centered-text-fill;13;320;0;64;64
+		phosphor-chat-centered-text-light;13;384;0;64;64
+		phosphor-chat-centered-text-thin;13;448;0;64;64
+		phosphor-chat-centered-text;13;512;0;64;64
+		phosphor-chat-centered-thin;13;576;0;64;64
+		phosphor-chat-centered;13;640;0;64;64
+		phosphor-chat-circle-bold;13;704;0;64;64
+		phosphor-chat-circle-dots-bold;13;768;0;64;64
+		phosphor-chat-circle-dots-duotone;13;832;0;64;64
+		phosphor-chat-circle-dots-fill;13;896;0;64;64
+		phosphor-chat-circle-dots-light;13;960;0;64;64
+		phosphor-chat-circle-dots-thin;13;0;64;64;64
+		phosphor-chat-circle-dots;13;64;64;64;64
+		phosphor-chat-circle-duotone;13;128;64;64;64
+		phosphor-chat-circle-fill;13;192;64;64;64
+		phosphor-chat-circle-light;13;256;64;64;64
+		phosphor-chat-circle-slash-bold;13;320;64;64;64
+		phosphor-chat-circle-slash-duotone;13;384;64;64;64
+		phosphor-chat-circle-slash-fill;13;448;64;64;64
+		phosphor-chat-circle-slash-light;13;512;64;64;64
+		phosphor-chat-circle-slash-thin;13;576;64;64;64
+		phosphor-chat-circle-slash;13;640;64;64;64
+		phosphor-chat-circle-text-bold;13;704;64;64;64
+		phosphor-chat-circle-text-duotone;13;768;64;64;64
+		phosphor-chat-circle-text-fill;13;832;64;64;64
+		phosphor-chat-circle-text-light;13;896;64;64;64
+		phosphor-chat-circle-text-thin;13;960;64;64;64
+		phosphor-chat-circle-text;13;0;128;64;64
+		phosphor-chat-circle-thin;13;64;128;64;64
+		phosphor-chat-circle;13;128;128;64;64
+		phosphor-chat-dots-bold;13;192;128;64;64
+		phosphor-chat-dots-duotone;13;256;128;64;64
+		phosphor-chat-dots-fill;13;320;128;64;64
+		phosphor-chat-dots-light;13;384;128;64;64
+		phosphor-chat-dots-thin;13;448;128;64;64
+		phosphor-chat-dots;13;512;128;64;64
+		phosphor-chat-duotone;13;576;128;64;64
+		phosphor-chat-fill;13;640;128;64;64
+		phosphor-chat-light;13;704;128;64;64
+		phosphor-chat-slash-bold;13;768;128;64;64
+		phosphor-chat-slash-duotone;13;832;128;64;64
+		phosphor-chat-slash-fill;13;896;128;64;64
+		phosphor-chat-slash-light;13;960;128;64;64
+		phosphor-chat-slash-thin;13;0;192;64;64
+		phosphor-chat-slash;13;64;192;64;64
+		phosphor-chat-teardrop-bold;13;128;192;64;64
+		phosphor-chat-teardrop-dots-bold;13;192;192;64;64
+		phosphor-chat-teardrop-dots-duotone;13;256;192;64;64
+		phosphor-chat-teardrop-dots-fill;13;320;192;64;64
+		phosphor-chat-teardrop-dots-light;13;384;192;64;64
+		phosphor-chat-teardrop-dots-thin;13;448;192;64;64
+		phosphor-chat-teardrop-dots;13;512;192;64;64
+		phosphor-chat-teardrop-duotone;13;576;192;64;64
+		phosphor-chat-teardrop-fill;13;640;192;64;64
+		phosphor-chat-teardrop-light;13;704;192;64;64
+		phosphor-chat-teardrop-slash-bold;13;768;192;64;64
+		phosphor-chat-teardrop-slash-duotone;13;832;192;64;64
+		phosphor-chat-teardrop-slash-fill;13;896;192;64;64
+		phosphor-chat-teardrop-slash-light;13;960;192;64;64
+		phosphor-chat-teardrop-slash-thin;13;0;256;64;64
+		phosphor-chat-teardrop-slash;13;64;256;64;64
+		phosphor-chat-teardrop-text-bold;13;128;256;64;64
+		phosphor-chat-teardrop-text-duotone;13;192;256;64;64
+		phosphor-chat-teardrop-text-fill;13;256;256;64;64
+		phosphor-chat-teardrop-text-light;13;320;256;64;64
+		phosphor-chat-teardrop-text-thin;13;384;256;64;64
+		phosphor-chat-teardrop-text;13;448;256;64;64
+		phosphor-chat-teardrop-thin;13;512;256;64;64
+		phosphor-chat-teardrop;13;576;256;64;64
+		phosphor-chat-text-bold;13;640;256;64;64
+		phosphor-chat-text-duotone;13;704;256;64;64
+		phosphor-chat-text-fill;13;768;256;64;64
+		phosphor-chat-text-light;13;832;256;64;64
+		phosphor-chat-text-thin;13;896;256;64;64
+		phosphor-chat-text;13;960;256;64;64
+		phosphor-chat-thin;13;0;320;64;64
+		phosphor-chat;13;64;320;64;64
+		phosphor-chats-bold;13;128;320;64;64
+		phosphor-chats-circle-bold;13;192;320;64;64
+		phosphor-chats-circle-duotone;13;256;320;64;64
+		phosphor-chats-circle-fill;13;320;320;64;64
+		phosphor-chats-circle-light;13;384;320;64;64
+		phosphor-chats-circle-thin;13;448;320;64;64
+		phosphor-chats-circle;13;512;320;64;64
+		phosphor-chats-duotone;13;576;320;64;64
+		phosphor-chats-fill;13;640;320;64;64
+		phosphor-chats-light;13;704;320;64;64
+		phosphor-chats-teardrop-bold;13;768;320;64;64
+		phosphor-chats-teardrop-duotone;13;832;320;64;64
+		phosphor-chats-teardrop-fill;13;896;320;64;64
+		phosphor-chats-teardrop-light;13;960;320;64;64
+		phosphor-chats-teardrop-thin;13;0;384;64;64
+		phosphor-chats-teardrop;13;64;384;64;64
+		phosphor-chats-thin;13;128;384;64;64
+		phosphor-chats;13;192;384;64;64
+		phosphor-check-bold;13;256;384;64;64
+		phosphor-check-circle-bold;13;320;384;64;64
+		phosphor-check-circle-duotone;13;384;384;64;64
+		phosphor-check-circle-fill;13;448;384;64;64
+		phosphor-check-circle-light;13;512;384;64;64
+		phosphor-check-circle-thin;13;576;384;64;64
+		phosphor-check-circle;13;640;384;64;64
+		phosphor-check-duotone;13;704;384;64;64
+		phosphor-check-fat-bold;13;768;384;64;64
+		phosphor-check-fat-duotone;13;832;384;64;64
+		phosphor-check-fat-fill;13;896;384;64;64
+		phosphor-check-fat-light;13;960;384;64;64
+		phosphor-check-fat-thin;13;0;448;64;64
+		phosphor-check-fat;13;64;448;64;64
+		phosphor-check-fill;13;128;448;64;64
+		phosphor-check-light;13;192;448;64;64
+		phosphor-check-square-bold;13;256;448;64;64
+		phosphor-check-square-duotone;13;320;448;64;64
+		phosphor-check-square-fill;13;384;448;64;64
+		phosphor-check-square-light;13;448;448;64;64
+		phosphor-check-square-offset-bold;13;512;448;64;64
+		phosphor-check-square-offset-duotone;13;576;448;64;64
+		phosphor-check-square-offset-fill;13;640;448;64;64
+		phosphor-check-square-offset-light;13;704;448;64;64
+		phosphor-check-square-offset-thin;13;768;448;64;64
+		phosphor-check-square-offset;13;832;448;64;64
+		phosphor-check-square-thin;13;896;448;64;64
+		phosphor-check-square;13;960;448;64;64
+		phosphor-check-thin;13;0;512;64;64
+		phosphor-check;13;64;512;64;64
+		phosphor-checkerboard-bold;13;128;512;64;64
+		phosphor-checkerboard-duotone;13;192;512;64;64
+		phosphor-checkerboard-fill;13;256;512;64;64
+		phosphor-checkerboard-light;13;320;512;64;64
+		phosphor-checkerboard-thin;13;384;512;64;64
+		phosphor-checkerboard;13;448;512;64;64
+		phosphor-checks-bold;13;512;512;64;64
+		phosphor-checks-duotone;13;576;512;64;64
+		phosphor-checks-fill;13;640;512;64;64
+		phosphor-checks-light;13;704;512;64;64
+		phosphor-checks-thin;13;768;512;64;64
+		phosphor-checks;13;832;512;64;64
+		phosphor-cheers-bold;13;896;512;64;64
+		phosphor-cheers-duotone;13;960;512;64;64
+		phosphor-cheers-fill;13;0;576;64;64
+		phosphor-cheers-light;13;64;576;64;64
+		phosphor-cheers-thin;13;128;576;64;64
+		phosphor-cheers;13;192;576;64;64
+		phosphor-cheese-bold;13;256;576;64;64
+		phosphor-cheese-duotone;13;320;576;64;64
+		phosphor-cheese-fill;13;384;576;64;64
+		phosphor-cheese-light;13;448;576;64;64
+		phosphor-cheese-thin;13;512;576;64;64
+		phosphor-cheese;13;576;576;64;64
+		phosphor-chef-hat-bold;13;640;576;64;64
+		phosphor-chef-hat-duotone;13;704;576;64;64
+		phosphor-chef-hat-fill;13;768;576;64;64
+		phosphor-chef-hat-light;13;832;576;64;64
+		phosphor-chef-hat-thin;13;896;576;64;64
+		phosphor-chef-hat;13;960;576;64;64
+		phosphor-cherries-bold;13;0;640;64;64
+		phosphor-cherries-duotone;13;64;640;64;64
+		phosphor-cherries-fill;13;128;640;64;64
+		phosphor-cherries-light;13;192;640;64;64
+		phosphor-cherries-thin;13;256;640;64;64
+		phosphor-cherries;13;320;640;64;64
+		phosphor-church-bold;13;384;640;64;64
+		phosphor-church-duotone;13;448;640;64;64
+		phosphor-church-fill;13;512;640;64;64
+		phosphor-church-light;13;576;640;64;64
+		phosphor-church-thin;13;640;640;64;64
+		phosphor-church;13;704;640;64;64
+		phosphor-cigarette-bold;13;768;640;64;64
+		phosphor-cigarette-duotone;13;832;640;64;64
+		phosphor-cigarette-fill;13;896;640;64;64
+		phosphor-cigarette-light;13;960;640;64;64
+		phosphor-cigarette-slash-bold;13;0;704;64;64
+		phosphor-cigarette-slash-duotone;13;64;704;64;64
+		phosphor-cigarette-slash-fill;13;128;704;64;64
+		phosphor-cigarette-slash-light;13;192;704;64;64
+		phosphor-cigarette-slash-thin;13;256;704;64;64
+		phosphor-cigarette-slash;13;320;704;64;64
+		phosphor-cigarette-thin;13;384;704;64;64
+		phosphor-cigarette;13;448;704;64;64
+		phosphor-circle-bold;13;512;704;64;64
+		phosphor-circle-dashed-bold;13;576;704;64;64
+		phosphor-circle-dashed-duotone;13;640;704;64;64
+		phosphor-circle-dashed-fill;13;704;704;64;64
+		phosphor-circle-dashed-light;13;768;704;64;64
+		phosphor-circle-dashed-thin;13;832;704;64;64
+		phosphor-circle-dashed;13;896;704;64;64
+		phosphor-circle-duotone;13;960;704;64;64
+		phosphor-circle-fill;13;0;768;64;64
+		phosphor-circle-half-bold;13;64;768;64;64
+		phosphor-circle-half-duotone;13;128;768;64;64
+		phosphor-circle-half-fill;13;192;768;64;64
+		phosphor-circle-half-light;13;256;768;64;64
+		phosphor-circle-half-thin;13;320;768;64;64
+		phosphor-circle-half-tilt-bold;13;384;768;64;64
+		phosphor-circle-half-tilt-duotone;13;448;768;64;64
+		phosphor-circle-half-tilt-fill;13;512;768;64;64
+		phosphor-circle-half-tilt-light;13;576;768;64;64
+		phosphor-circle-half-tilt-thin;13;640;768;64;64
+		phosphor-circle-half-tilt;13;704;768;64;64
+		phosphor-circle-half;13;768;768;64;64
+		phosphor-circle-light;13;832;768;64;64
+		phosphor-circle-notch-bold;13;896;768;64;64
+		phosphor-circle-notch-duotone;13;960;768;64;64
+		phosphor-circle-notch-fill;13;0;832;64;64
+		phosphor-circle-notch-light;13;64;832;64;64
+		phosphor-circle-notch-thin;13;128;832;64;64
+		phosphor-circle-notch;13;192;832;64;64
+		phosphor-circle-thin;13;256;832;64;64
+		phosphor-circle;13;320;832;64;64
+		phosphor-circles-four-bold;13;384;832;64;64
+		phosphor-circles-four-duotone;13;448;832;64;64
+		phosphor-circles-four-fill;13;512;832;64;64
+		phosphor-circles-four-light;13;576;832;64;64
+		phosphor-circles-four-thin;13;640;832;64;64
+		phosphor-circles-four;13;704;832;64;64
+		phosphor-circles-three-bold;13;768;832;64;64
+		phosphor-circles-three-duotone;13;832;832;64;64
+		phosphor-circles-three-fill;13;896;832;64;64
+		phosphor-circles-three-light;13;960;832;64;64
+		phosphor-circles-three-plus-bold;13;0;896;64;64
+		phosphor-circles-three-plus-duotone;13;64;896;64;64
+		phosphor-circles-three-plus-fill;13;128;896;64;64
+		phosphor-circles-three-plus-light;13;192;896;64;64
+		phosphor-circles-three-plus-thin;13;256;896;64;64
+		phosphor-circles-three-plus;13;320;896;64;64
+		phosphor-circles-three-thin;13;384;896;64;64
+		phosphor-circles-three;13;448;896;64;64
+		phosphor-circuitry-bold;13;512;896;64;64
+		phosphor-circuitry-duotone;13;576;896;64;64
+		phosphor-circuitry-fill;13;640;896;64;64
+		phosphor-circuitry-light;13;704;896;64;64
+		phosphor-circuitry-thin;13;768;896;64;64
+		phosphor-circuitry;13;832;896;64;64
+		phosphor-city-bold;13;896;896;64;64
+		phosphor-city-duotone;13;960;896;64;64
+		phosphor-city-fill;13;0;960;64;64
+		phosphor-city-light;13;64;960;64;64
+		phosphor-city-thin;13;128;960;64;64
+		phosphor-city;13;192;960;64;64
+		phosphor-clipboard-bold;13;256;960;64;64
+		phosphor-clipboard-duotone;13;320;960;64;64
+		phosphor-clipboard-fill;13;384;960;64;64
+		phosphor-clipboard-light;13;448;960;64;64
+		phosphor-clipboard-text-bold;13;512;960;64;64
+		phosphor-clipboard-text-duotone;13;576;960;64;64
+		phosphor-clipboard-text-fill;13;640;960;64;64
+		phosphor-clipboard-text-light;13;704;960;64;64
+		phosphor-clipboard-text-thin;13;768;960;64;64
+		phosphor-clipboard-text;13;832;960;64;64
+		phosphor-clipboard-thin;13;896;960;64;64
+		phosphor-clipboard;13;960;960;64;64
+		phosphor-clock-afternoon-bold;14;0;0;64;64
+		phosphor-clock-afternoon-duotone;14;64;0;64;64
+		phosphor-clock-afternoon-fill;14;128;0;64;64
+		phosphor-clock-afternoon-light;14;192;0;64;64
+		phosphor-clock-afternoon-thin;14;256;0;64;64
+		phosphor-clock-afternoon;14;320;0;64;64
+		phosphor-clock-bold;14;384;0;64;64
+		phosphor-clock-clockwise-bold;14;448;0;64;64
+		phosphor-clock-clockwise-duotone;14;512;0;64;64
+		phosphor-clock-clockwise-fill;14;576;0;64;64
+		phosphor-clock-clockwise-light;14;640;0;64;64
+		phosphor-clock-clockwise-thin;14;704;0;64;64
+		phosphor-clock-clockwise;14;768;0;64;64
+		phosphor-clock-countdown-bold;14;832;0;64;64
+		phosphor-clock-countdown-duotone;14;896;0;64;64
+		phosphor-clock-countdown-fill;14;960;0;64;64
+		phosphor-clock-countdown-light;14;0;64;64;64
+		phosphor-clock-countdown-thin;14;64;64;64;64
+		phosphor-clock-countdown;14;128;64;64;64
+		phosphor-clock-counter-clockwise-bold;14;192;64;64;64
+		phosphor-clock-counter-clockwise-duotone;14;256;64;64;64
+		phosphor-clock-counter-clockwise-fill;14;320;64;64;64
+		phosphor-clock-counter-clockwise-light;14;384;64;64;64
+		phosphor-clock-counter-clockwise-thin;14;448;64;64;64
+		phosphor-clock-counter-clockwise;14;512;64;64;64
+		phosphor-clock-duotone;14;576;64;64;64
+		phosphor-clock-fill;14;640;64;64;64
+		phosphor-clock-light;14;704;64;64;64
+		phosphor-clock-thin;14;768;64;64;64
+		phosphor-clock-user-bold;14;832;64;64;64
+		phosphor-clock-user-duotone;14;896;64;64;64
+		phosphor-clock-user-fill;14;960;64;64;64
+		phosphor-clock-user-light;14;0;128;64;64
+		phosphor-clock-user-thin;14;64;128;64;64
+		phosphor-clock-user;14;128;128;64;64
+		phosphor-clock;14;192;128;64;64
+		phosphor-closed-captioning-bold;14;256;128;64;64
+		phosphor-closed-captioning-duotone;14;320;128;64;64
+		phosphor-closed-captioning-fill;14;384;128;64;64
+		phosphor-closed-captioning-light;14;448;128;64;64
+		phosphor-closed-captioning-thin;14;512;128;64;64
+		phosphor-closed-captioning;14;576;128;64;64
+		phosphor-cloud-arrow-down-bold;14;640;128;64;64
+		phosphor-cloud-arrow-down-duotone;14;704;128;64;64
+		phosphor-cloud-arrow-down-fill;14;768;128;64;64
+		phosphor-cloud-arrow-down-light;14;832;128;64;64
+		phosphor-cloud-arrow-down-thin;14;896;128;64;64
+		phosphor-cloud-arrow-down;14;960;128;64;64
+		phosphor-cloud-arrow-up-bold;14;0;192;64;64
+		phosphor-cloud-arrow-up-duotone;14;64;192;64;64
+		phosphor-cloud-arrow-up-fill;14;128;192;64;64
+		phosphor-cloud-arrow-up-light;14;192;192;64;64
+		phosphor-cloud-arrow-up-thin;14;256;192;64;64
+		phosphor-cloud-arrow-up;14;320;192;64;64
+		phosphor-cloud-bold;14;384;192;64;64
+		phosphor-cloud-check-bold;14;448;192;64;64
+		phosphor-cloud-check-duotone;14;512;192;64;64
+		phosphor-cloud-check-fill;14;576;192;64;64
+		phosphor-cloud-check-light;14;640;192;64;64
+		phosphor-cloud-check-thin;14;704;192;64;64
+		phosphor-cloud-check;14;768;192;64;64
+		phosphor-cloud-duotone;14;832;192;64;64
+		phosphor-cloud-fill;14;896;192;64;64
+		phosphor-cloud-fog-bold;14;960;192;64;64
+		phosphor-cloud-fog-duotone;14;0;256;64;64
+		phosphor-cloud-fog-fill;14;64;256;64;64
+		phosphor-cloud-fog-light;14;128;256;64;64
+		phosphor-cloud-fog-thin;14;192;256;64;64
+		phosphor-cloud-fog;14;256;256;64;64
+		phosphor-cloud-light;14;320;256;64;64
+		phosphor-cloud-lightning-bold;14;384;256;64;64
+		phosphor-cloud-lightning-duotone;14;448;256;64;64
+		phosphor-cloud-lightning-fill;14;512;256;64;64
+		phosphor-cloud-lightning-light;14;576;256;64;64
+		phosphor-cloud-lightning-thin;14;640;256;64;64
+		phosphor-cloud-lightning;14;704;256;64;64
+		phosphor-cloud-moon-bold;14;768;256;64;64
+		phosphor-cloud-moon-duotone;14;832;256;64;64
+		phosphor-cloud-moon-fill;14;896;256;64;64
+		phosphor-cloud-moon-light;14;960;256;64;64
+		phosphor-cloud-moon-thin;14;0;320;64;64
+		phosphor-cloud-moon;14;64;320;64;64
+		phosphor-cloud-rain-bold;14;128;320;64;64
+		phosphor-cloud-rain-duotone;14;192;320;64;64
+		phosphor-cloud-rain-fill;14;256;320;64;64
+		phosphor-cloud-rain-light;14;320;320;64;64
+		phosphor-cloud-rain-thin;14;384;320;64;64
+		phosphor-cloud-rain;14;448;320;64;64
+		phosphor-cloud-slash-bold;14;512;320;64;64
+		phosphor-cloud-slash-duotone;14;576;320;64;64
+		phosphor-cloud-slash-fill;14;640;320;64;64
+		phosphor-cloud-slash-light;14;704;320;64;64
+		phosphor-cloud-slash-thin;14;768;320;64;64
+		phosphor-cloud-slash;14;832;320;64;64
+		phosphor-cloud-snow-bold;14;896;320;64;64
+		phosphor-cloud-snow-duotone;14;960;320;64;64
+		phosphor-cloud-snow-fill;14;0;384;64;64
+		phosphor-cloud-snow-light;14;64;384;64;64
+		phosphor-cloud-snow-thin;14;128;384;64;64
+		phosphor-cloud-snow;14;192;384;64;64
+		phosphor-cloud-sun-bold;14;256;384;64;64
+		phosphor-cloud-sun-duotone;14;320;384;64;64
+		phosphor-cloud-sun-fill;14;384;384;64;64
+		phosphor-cloud-sun-light;14;448;384;64;64
+		phosphor-cloud-sun-thin;14;512;384;64;64
+		phosphor-cloud-sun;14;576;384;64;64
+		phosphor-cloud-thin;14;640;384;64;64
+		phosphor-cloud-warning-bold;14;704;384;64;64
+		phosphor-cloud-warning-duotone;14;768;384;64;64
+		phosphor-cloud-warning-fill;14;832;384;64;64
+		phosphor-cloud-warning-light;14;896;384;64;64
+		phosphor-cloud-warning-thin;14;960;384;64;64
+		phosphor-cloud-warning;14;0;448;64;64
+		phosphor-cloud-x-bold;14;64;448;64;64
+		phosphor-cloud-x-duotone;14;128;448;64;64
+		phosphor-cloud-x-fill;14;192;448;64;64
+		phosphor-cloud-x-light;14;256;448;64;64
+		phosphor-cloud-x-thin;14;320;448;64;64
+		phosphor-cloud-x;14;384;448;64;64
+		phosphor-cloud;14;448;448;64;64
+		phosphor-clover-bold;14;512;448;64;64
+		phosphor-clover-duotone;14;576;448;64;64
+		phosphor-clover-fill;14;640;448;64;64
+		phosphor-clover-light;14;704;448;64;64
+		phosphor-clover-thin;14;768;448;64;64
+		phosphor-clover;14;832;448;64;64
+		phosphor-club-bold;14;896;448;64;64
+		phosphor-club-duotone;14;960;448;64;64
+		phosphor-club-fill;14;0;512;64;64
+		phosphor-club-light;14;64;512;64;64
+		phosphor-club-thin;14;128;512;64;64
+		phosphor-club;14;192;512;64;64
+		phosphor-coat-hanger-bold;14;256;512;64;64
+		phosphor-coat-hanger-duotone;14;320;512;64;64
+		phosphor-coat-hanger-fill;14;384;512;64;64
+		phosphor-coat-hanger-light;14;448;512;64;64
+		phosphor-coat-hanger-thin;14;512;512;64;64
+		phosphor-coat-hanger;14;576;512;64;64
+		phosphor-coda-logo-bold;14;640;512;64;64
+		phosphor-coda-logo-duotone;14;704;512;64;64
+		phosphor-coda-logo-fill;14;768;512;64;64
+		phosphor-coda-logo-light;14;832;512;64;64
+		phosphor-coda-logo-thin;14;896;512;64;64
+		phosphor-coda-logo;14;960;512;64;64
+		phosphor-code-block-bold;14;0;576;64;64
+		phosphor-code-block-duotone;14;64;576;64;64
+		phosphor-code-block-fill;14;128;576;64;64
+		phosphor-code-block-light;14;192;576;64;64
+		phosphor-code-block-thin;14;256;576;64;64
+		phosphor-code-block;14;320;576;64;64
+		phosphor-code-bold;14;384;576;64;64
+		phosphor-code-duotone;14;448;576;64;64
+		phosphor-code-fill;14;512;576;64;64
+		phosphor-code-light;14;576;576;64;64
+		phosphor-code-simple-bold;14;640;576;64;64
+		phosphor-code-simple-duotone;14;704;576;64;64
+		phosphor-code-simple-fill;14;768;576;64;64
+		phosphor-code-simple-light;14;832;576;64;64
+		phosphor-code-simple-thin;14;896;576;64;64
+		phosphor-code-simple;14;960;576;64;64
+		phosphor-code-thin;14;0;640;64;64
+		phosphor-code;14;64;640;64;64
+		phosphor-codepen-logo-bold;14;128;640;64;64
+		phosphor-codepen-logo-duotone;14;192;640;64;64
+		phosphor-codepen-logo-fill;14;256;640;64;64
+		phosphor-codepen-logo-light;14;320;640;64;64
+		phosphor-codepen-logo-thin;14;384;640;64;64
+		phosphor-codepen-logo;14;448;640;64;64
+		phosphor-codesandbox-logo-bold;14;512;640;64;64
+		phosphor-codesandbox-logo-duotone;14;576;640;64;64
+		phosphor-codesandbox-logo-fill;14;640;640;64;64
+		phosphor-codesandbox-logo-light;14;704;640;64;64
+		phosphor-codesandbox-logo-thin;14;768;640;64;64
+		phosphor-codesandbox-logo;14;832;640;64;64
+		phosphor-coffee-bean-bold;14;896;640;64;64
+		phosphor-coffee-bean-duotone;14;960;640;64;64
+		phosphor-coffee-bean-fill;14;0;704;64;64
+		phosphor-coffee-bean-light;14;64;704;64;64
+		phosphor-coffee-bean-thin;14;128;704;64;64
+		phosphor-coffee-bean;14;192;704;64;64
+		phosphor-coffee-bold;14;256;704;64;64
+		phosphor-coffee-duotone;14;320;704;64;64
+		phosphor-coffee-fill;14;384;704;64;64
+		phosphor-coffee-light;14;448;704;64;64
+		phosphor-coffee-thin;14;512;704;64;64
+		phosphor-coffee;14;576;704;64;64
+		phosphor-coin-bold;14;640;704;64;64
+		phosphor-coin-duotone;14;704;704;64;64
+		phosphor-coin-fill;14;768;704;64;64
+		phosphor-coin-light;14;832;704;64;64
+		phosphor-coin-thin;14;896;704;64;64
+		phosphor-coin-vertical-bold;14;960;704;64;64
+		phosphor-coin-vertical-duotone;14;0;768;64;64
+		phosphor-coin-vertical-fill;14;64;768;64;64
+		phosphor-coin-vertical-light;14;128;768;64;64
+		phosphor-coin-vertical-thin;14;192;768;64;64
+		phosphor-coin-vertical;14;256;768;64;64
+		phosphor-coin;14;320;768;64;64
+		phosphor-coins-bold;14;384;768;64;64
+		phosphor-coins-duotone;14;448;768;64;64
+		phosphor-coins-fill;14;512;768;64;64
+		phosphor-coins-light;14;576;768;64;64
+		phosphor-coins-thin;14;640;768;64;64
+		phosphor-coins;14;704;768;64;64
+		phosphor-columns-bold;14;768;768;64;64
+		phosphor-columns-duotone;14;832;768;64;64
+		phosphor-columns-fill;14;896;768;64;64
+		phosphor-columns-light;14;960;768;64;64
+		phosphor-columns-plus-left-bold;14;0;832;64;64
+		phosphor-columns-plus-left-duotone;14;64;832;64;64
+		phosphor-columns-plus-left-fill;14;128;832;64;64
+		phosphor-columns-plus-left-light;14;192;832;64;64
+		phosphor-columns-plus-left-thin;14;256;832;64;64
+		phosphor-columns-plus-left;14;320;832;64;64
+		phosphor-columns-plus-right-bold;14;384;832;64;64
+		phosphor-columns-plus-right-duotone;14;448;832;64;64
+		phosphor-columns-plus-right-fill;14;512;832;64;64
+		phosphor-columns-plus-right-light;14;576;832;64;64
+		phosphor-columns-plus-right-thin;14;640;832;64;64
+		phosphor-columns-plus-right;14;704;832;64;64
+		phosphor-columns-thin;14;768;832;64;64
+		phosphor-columns;14;832;832;64;64
+		phosphor-command-bold;14;896;832;64;64
+		phosphor-command-duotone;14;960;832;64;64
+		phosphor-command-fill;14;0;896;64;64
+		phosphor-command-light;14;64;896;64;64
+		phosphor-command-thin;14;128;896;64;64
+		phosphor-command;14;192;896;64;64
+		phosphor-compass-bold;14;256;896;64;64
+		phosphor-compass-duotone;14;320;896;64;64
+		phosphor-compass-fill;14;384;896;64;64
+		phosphor-compass-light;14;448;896;64;64
+		phosphor-compass-rose-bold;14;512;896;64;64
+		phosphor-compass-rose-duotone;14;576;896;64;64
+		phosphor-compass-rose-fill;14;640;896;64;64
+		phosphor-compass-rose-light;14;704;896;64;64
+		phosphor-compass-rose-thin;14;768;896;64;64
+		phosphor-compass-rose;14;832;896;64;64
+		phosphor-compass-thin;14;896;896;64;64
+		phosphor-compass-tool-bold;14;960;896;64;64
+		phosphor-compass-tool-duotone;14;0;960;64;64
+		phosphor-compass-tool-fill;14;64;960;64;64
+		phosphor-compass-tool-light;14;128;960;64;64
+		phosphor-compass-tool-thin;14;192;960;64;64
+		phosphor-compass-tool;14;256;960;64;64
+		phosphor-compass;14;320;960;64;64
+		phosphor-computer-tower-bold;14;384;960;64;64
+		phosphor-computer-tower-duotone;14;448;960;64;64
+		phosphor-computer-tower-fill;14;512;960;64;64
+		phosphor-computer-tower-light;14;576;960;64;64
+		phosphor-computer-tower-thin;14;640;960;64;64
+		phosphor-computer-tower;14;704;960;64;64
+		phosphor-confetti-bold;14;768;960;64;64
+		phosphor-confetti-duotone;14;832;960;64;64
+		phosphor-confetti-fill;14;896;960;64;64
+		phosphor-confetti-light;14;960;960;64;64
+		phosphor-confetti-thin;15;0;0;64;64
+		phosphor-confetti;15;64;0;64;64
+		phosphor-contactless-payment-bold;15;128;0;64;64
+		phosphor-contactless-payment-duotone;15;192;0;64;64
+		phosphor-contactless-payment-fill;15;256;0;64;64
+		phosphor-contactless-payment-light;15;320;0;64;64
+		phosphor-contactless-payment-thin;15;384;0;64;64
+		phosphor-contactless-payment;15;448;0;64;64
+		phosphor-control-bold;15;512;0;64;64
+		phosphor-control-duotone;15;576;0;64;64
+		phosphor-control-fill;15;640;0;64;64
+		phosphor-control-light;15;704;0;64;64
+		phosphor-control-thin;15;768;0;64;64
+		phosphor-control;15;832;0;64;64
+		phosphor-cookie-bold;15;896;0;64;64
+		phosphor-cookie-duotone;15;960;0;64;64
+		phosphor-cookie-fill;15;0;64;64;64
+		phosphor-cookie-light;15;64;64;64;64
+		phosphor-cookie-thin;15;128;64;64;64
+		phosphor-cookie;15;192;64;64;64
+		phosphor-cooking-pot-bold;15;256;64;64;64
+		phosphor-cooking-pot-duotone;15;320;64;64;64
+		phosphor-cooking-pot-fill;15;384;64;64;64
+		phosphor-cooking-pot-light;15;448;64;64;64
+		phosphor-cooking-pot-thin;15;512;64;64;64
+		phosphor-cooking-pot;15;576;64;64;64
+		phosphor-copy-bold;15;640;64;64;64
+		phosphor-copy-duotone;15;704;64;64;64
+		phosphor-copy-fill;15;768;64;64;64
+		phosphor-copy-light;15;832;64;64;64
+		phosphor-copy-simple-bold;15;896;64;64;64
+		phosphor-copy-simple-duotone;15;960;64;64;64
+		phosphor-copy-simple-fill;15;0;128;64;64
+		phosphor-copy-simple-light;15;64;128;64;64
+		phosphor-copy-simple-thin;15;128;128;64;64
+		phosphor-copy-simple;15;192;128;64;64
+		phosphor-copy-thin;15;256;128;64;64
+		phosphor-copy;15;320;128;64;64
+		phosphor-copyleft-bold;15;384;128;64;64
+		phosphor-copyleft-duotone;15;448;128;64;64
+		phosphor-copyleft-fill;15;512;128;64;64
+		phosphor-copyleft-light;15;576;128;64;64
+		phosphor-copyleft-thin;15;640;128;64;64
+		phosphor-copyleft;15;704;128;64;64
+		phosphor-copyright-bold;15;768;128;64;64
+		phosphor-copyright-duotone;15;832;128;64;64
+		phosphor-copyright-fill;15;896;128;64;64
+		phosphor-copyright-light;15;960;128;64;64
+		phosphor-copyright-thin;15;0;192;64;64
+		phosphor-copyright;15;64;192;64;64
+		phosphor-corners-in-bold;15;128;192;64;64
+		phosphor-corners-in-duotone;15;192;192;64;64
+		phosphor-corners-in-fill;15;256;192;64;64
+		phosphor-corners-in-light;15;320;192;64;64
+		phosphor-corners-in-thin;15;384;192;64;64
+		phosphor-corners-in;15;448;192;64;64
+		phosphor-corners-out-bold;15;512;192;64;64
+		phosphor-corners-out-duotone;15;576;192;64;64
+		phosphor-corners-out-fill;15;640;192;64;64
+		phosphor-corners-out-light;15;704;192;64;64
+		phosphor-corners-out-thin;15;768;192;64;64
+		phosphor-corners-out;15;832;192;64;64
+		phosphor-couch-bold;15;896;192;64;64
+		phosphor-couch-duotone;15;960;192;64;64
+		phosphor-couch-fill;15;0;256;64;64
+		phosphor-couch-light;15;64;256;64;64
+		phosphor-couch-thin;15;128;256;64;64
+		phosphor-couch;15;192;256;64;64
+		phosphor-court-basketball-bold;15;256;256;64;64
+		phosphor-court-basketball-duotone;15;320;256;64;64
+		phosphor-court-basketball-fill;15;384;256;64;64
+		phosphor-court-basketball-light;15;448;256;64;64
+		phosphor-court-basketball-thin;15;512;256;64;64
+		phosphor-court-basketball;15;576;256;64;64
+		phosphor-cow-bold;15;640;256;64;64
+		phosphor-cow-duotone;15;704;256;64;64
+		phosphor-cow-fill;15;768;256;64;64
+		phosphor-cow-light;15;832;256;64;64
+		phosphor-cow-thin;15;896;256;64;64
+		phosphor-cow;15;960;256;64;64
+		phosphor-cowboy-hat-bold;15;0;320;64;64
+		phosphor-cowboy-hat-duotone;15;64;320;64;64
+		phosphor-cowboy-hat-fill;15;128;320;64;64
+		phosphor-cowboy-hat-light;15;192;320;64;64
+		phosphor-cowboy-hat-thin;15;256;320;64;64
+		phosphor-cowboy-hat;15;320;320;64;64
+		phosphor-cpu-bold;15;384;320;64;64
+		phosphor-cpu-duotone;15;448;320;64;64
+		phosphor-cpu-fill;15;512;320;64;64
+		phosphor-cpu-light;15;576;320;64;64
+		phosphor-cpu-thin;15;640;320;64;64
+		phosphor-cpu;15;704;320;64;64
+		phosphor-crane-bold;15;768;320;64;64
+		phosphor-crane-duotone;15;832;320;64;64
+		phosphor-crane-fill;15;896;320;64;64
+		phosphor-crane-light;15;960;320;64;64
+		phosphor-crane-thin;15;0;384;64;64
+		phosphor-crane-tower-bold;15;64;384;64;64
+		phosphor-crane-tower-duotone;15;128;384;64;64
+		phosphor-crane-tower-fill;15;192;384;64;64
+		phosphor-crane-tower-light;15;256;384;64;64
+		phosphor-crane-tower-thin;15;320;384;64;64
+		phosphor-crane-tower;15;384;384;64;64
+		phosphor-crane;15;448;384;64;64
+		phosphor-credit-card-bold;15;512;384;64;64
+		phosphor-credit-card-duotone;15;576;384;64;64
+		phosphor-credit-card-fill;15;640;384;64;64
+		phosphor-credit-card-light;15;704;384;64;64
+		phosphor-credit-card-thin;15;768;384;64;64
+		phosphor-credit-card;15;832;384;64;64
+		phosphor-cricket-bold;15;896;384;64;64
+		phosphor-cricket-duotone;15;960;384;64;64
+		phosphor-cricket-fill;15;0;448;64;64
+		phosphor-cricket-light;15;64;448;64;64
+		phosphor-cricket-thin;15;128;448;64;64
+		phosphor-cricket;15;192;448;64;64
+		phosphor-crop-bold;15;256;448;64;64
+		phosphor-crop-duotone;15;320;448;64;64
+		phosphor-crop-fill;15;384;448;64;64
+		phosphor-crop-light;15;448;448;64;64
+		phosphor-crop-thin;15;512;448;64;64
+		phosphor-crop;15;576;448;64;64
+		phosphor-cross-bold;15;640;448;64;64
+		phosphor-cross-duotone;15;704;448;64;64
+		phosphor-cross-fill;15;768;448;64;64
+		phosphor-cross-light;15;832;448;64;64
+		phosphor-cross-thin;15;896;448;64;64
+		phosphor-cross;15;960;448;64;64
+		phosphor-crosshair-bold;15;0;512;64;64
+		phosphor-crosshair-duotone;15;64;512;64;64
+		phosphor-crosshair-fill;15;128;512;64;64
+		phosphor-crosshair-light;15;192;512;64;64
+		phosphor-crosshair-simple-bold;15;256;512;64;64
+		phosphor-crosshair-simple-duotone;15;320;512;64;64
+		phosphor-crosshair-simple-fill;15;384;512;64;64
+		phosphor-crosshair-simple-light;15;448;512;64;64
+		phosphor-crosshair-simple-thin;15;512;512;64;64
+		phosphor-crosshair-simple;15;576;512;64;64
+		phosphor-crosshair-thin;15;640;512;64;64
+		phosphor-crosshair;15;704;512;64;64
+		phosphor-crown-bold;15;768;512;64;64
+		phosphor-crown-cross-bold;15;832;512;64;64
+		phosphor-crown-cross-duotone;15;896;512;64;64
+		phosphor-crown-cross-fill;15;960;512;64;64
+		phosphor-crown-cross-light;15;0;576;64;64
+		phosphor-crown-cross-thin;15;64;576;64;64
+		phosphor-crown-cross;15;128;576;64;64
+		phosphor-crown-duotone;15;192;576;64;64
+		phosphor-crown-fill;15;256;576;64;64
+		phosphor-crown-light;15;320;576;64;64
+		phosphor-crown-simple-bold;15;384;576;64;64
+		phosphor-crown-simple-duotone;15;448;576;64;64
+		phosphor-crown-simple-fill;15;512;576;64;64
+		phosphor-crown-simple-light;15;576;576;64;64
+		phosphor-crown-simple-thin;15;640;576;64;64
+		phosphor-crown-simple;15;704;576;64;64
+		phosphor-crown-thin;15;768;576;64;64
+		phosphor-crown;15;832;576;64;64
+		phosphor-cube-bold;15;896;576;64;64
+		phosphor-cube-duotone;15;960;576;64;64
+		phosphor-cube-fill;15;0;640;64;64
+		phosphor-cube-focus-bold;15;64;640;64;64
+		phosphor-cube-focus-duotone;15;128;640;64;64
+		phosphor-cube-focus-fill;15;192;640;64;64
+		phosphor-cube-focus-light;15;256;640;64;64
+		phosphor-cube-focus-thin;15;320;640;64;64
+		phosphor-cube-focus;15;384;640;64;64
+		phosphor-cube-light;15;448;640;64;64
+		phosphor-cube-thin;15;512;640;64;64
+		phosphor-cube-transparent-bold;15;576;640;64;64
+		phosphor-cube-transparent-duotone;15;640;640;64;64
+		phosphor-cube-transparent-fill;15;704;640;64;64
+		phosphor-cube-transparent-light;15;768;640;64;64
+		phosphor-cube-transparent-thin;15;832;640;64;64
+		phosphor-cube-transparent;15;896;640;64;64
+		phosphor-cube;15;960;640;64;64
+		phosphor-currency-btc-bold;15;0;704;64;64
+		phosphor-currency-btc-duotone;15;64;704;64;64
+		phosphor-currency-btc-fill;15;128;704;64;64
+		phosphor-currency-btc-light;15;192;704;64;64
+		phosphor-currency-btc-thin;15;256;704;64;64
+		phosphor-currency-btc;15;320;704;64;64
+		phosphor-currency-circle-dollar-bold;15;384;704;64;64
+		phosphor-currency-circle-dollar-duotone;15;448;704;64;64
+		phosphor-currency-circle-dollar-fill;15;512;704;64;64
+		phosphor-currency-circle-dollar-light;15;576;704;64;64
+		phosphor-currency-circle-dollar-thin;15;640;704;64;64
+		phosphor-currency-circle-dollar;15;704;704;64;64
+		phosphor-currency-cny-bold;15;768;704;64;64
+		phosphor-currency-cny-duotone;15;832;704;64;64
+		phosphor-currency-cny-fill;15;896;704;64;64
+		phosphor-currency-cny-light;15;960;704;64;64
+		phosphor-currency-cny-thin;15;0;768;64;64
+		phosphor-currency-cny;15;64;768;64;64
+		phosphor-currency-dollar-bold;15;128;768;64;64
+		phosphor-currency-dollar-duotone;15;192;768;64;64
+		phosphor-currency-dollar-fill;15;256;768;64;64
+		phosphor-currency-dollar-light;15;320;768;64;64
+		phosphor-currency-dollar-simple-bold;15;384;768;64;64
+		phosphor-currency-dollar-simple-duotone;15;448;768;64;64
+		phosphor-currency-dollar-simple-fill;15;512;768;64;64
+		phosphor-currency-dollar-simple-light;15;576;768;64;64
+		phosphor-currency-dollar-simple-thin;15;640;768;64;64
+		phosphor-currency-dollar-simple;15;704;768;64;64
+		phosphor-currency-dollar-thin;15;768;768;64;64
+		phosphor-currency-dollar;15;832;768;64;64
+		phosphor-currency-eth-bold;15;896;768;64;64
+		phosphor-currency-eth-duotone;15;960;768;64;64
+		phosphor-currency-eth-fill;15;0;832;64;64
+		phosphor-currency-eth-light;15;64;832;64;64
+		phosphor-currency-eth-thin;15;128;832;64;64
+		phosphor-currency-eth;15;192;832;64;64
+		phosphor-currency-eur-bold;15;256;832;64;64
+		phosphor-currency-eur-duotone;15;320;832;64;64
+		phosphor-currency-eur-fill;15;384;832;64;64
+		phosphor-currency-eur-light;15;448;832;64;64
+		phosphor-currency-eur-thin;15;512;832;64;64
+		phosphor-currency-eur;15;576;832;64;64
+		phosphor-currency-gbp-bold;15;640;832;64;64
+		phosphor-currency-gbp-duotone;15;704;832;64;64
+		phosphor-currency-gbp-fill;15;768;832;64;64
+		phosphor-currency-gbp-light;15;832;832;64;64
+		phosphor-currency-gbp-thin;15;896;832;64;64
+		phosphor-currency-gbp;15;960;832;64;64
+		phosphor-currency-inr-bold;15;0;896;64;64
+		phosphor-currency-inr-duotone;15;64;896;64;64
+		phosphor-currency-inr-fill;15;128;896;64;64
+		phosphor-currency-inr-light;15;192;896;64;64
+		phosphor-currency-inr-thin;15;256;896;64;64
+		phosphor-currency-inr;15;320;896;64;64
+		phosphor-currency-jpy-bold;15;384;896;64;64
+		phosphor-currency-jpy-duotone;15;448;896;64;64
+		phosphor-currency-jpy-fill;15;512;896;64;64
+		phosphor-currency-jpy-light;15;576;896;64;64
+		phosphor-currency-jpy-thin;15;640;896;64;64
+		phosphor-currency-jpy;15;704;896;64;64
+		phosphor-currency-krw-bold;15;768;896;64;64
+		phosphor-currency-krw-duotone;15;832;896;64;64
+		phosphor-currency-krw-fill;15;896;896;64;64
+		phosphor-currency-krw-light;15;960;896;64;64
+		phosphor-currency-krw-thin;15;0;960;64;64
+		phosphor-currency-krw;15;64;960;64;64
+		phosphor-currency-kzt-bold;15;128;960;64;64
+		phosphor-currency-kzt-duotone;15;192;960;64;64
+		phosphor-currency-kzt-fill;15;256;960;64;64
+		phosphor-currency-kzt-light;15;320;960;64;64
+		phosphor-currency-kzt-thin;15;384;960;64;64
+		phosphor-currency-kzt;15;448;960;64;64
+		phosphor-currency-ngn-bold;15;512;960;64;64
+		phosphor-currency-ngn-duotone;15;576;960;64;64
+		phosphor-currency-ngn-fill;15;640;960;64;64
+		phosphor-currency-ngn-light;15;704;960;64;64
+		phosphor-currency-ngn-thin;15;768;960;64;64
+		phosphor-currency-ngn;15;832;960;64;64
+		phosphor-currency-rub-bold;15;896;960;64;64
+		phosphor-currency-rub-duotone;15;960;960;64;64
+		phosphor-currency-rub-fill;16;0;0;64;64
+		phosphor-currency-rub-light;16;64;0;64;64
+		phosphor-currency-rub-thin;16;128;0;64;64
+		phosphor-currency-rub;16;192;0;64;64
+		phosphor-cursor-bold;16;256;0;64;64
+		phosphor-cursor-click-bold;16;320;0;64;64
+		phosphor-cursor-click-duotone;16;384;0;64;64
+		phosphor-cursor-click-fill;16;448;0;64;64
+		phosphor-cursor-click-light;16;512;0;64;64
+		phosphor-cursor-click-thin;16;576;0;64;64
+		phosphor-cursor-click;16;640;0;64;64
+		phosphor-cursor-duotone;16;704;0;64;64
+		phosphor-cursor-fill;16;768;0;64;64
+		phosphor-cursor-light;16;832;0;64;64
+		phosphor-cursor-text-bold;16;896;0;64;64
+		phosphor-cursor-text-duotone;16;960;0;64;64
+		phosphor-cursor-text-fill;16;0;64;64;64
+		phosphor-cursor-text-light;16;64;64;64;64
+		phosphor-cursor-text-thin;16;128;64;64;64
+		phosphor-cursor-text;16;192;64;64;64
+		phosphor-cursor-thin;16;256;64;64;64
+		phosphor-cursor;16;320;64;64;64
+		phosphor-cylinder-bold;16;384;64;64;64
+		phosphor-cylinder-duotone;16;448;64;64;64
+		phosphor-cylinder-fill;16;512;64;64;64
+		phosphor-cylinder-light;16;576;64;64;64
+		phosphor-cylinder-thin;16;640;64;64;64
+		phosphor-cylinder;16;704;64;64;64
+		phosphor-database-bold;16;768;64;64;64
+		phosphor-database-duotone;16;832;64;64;64
+		phosphor-database-fill;16;896;64;64;64
+		phosphor-database-light;16;960;64;64;64
+		phosphor-database-thin;16;0;128;64;64
+		phosphor-database;16;64;128;64;64
+		phosphor-desk-bold;16;128;128;64;64
+		phosphor-desk-duotone;16;192;128;64;64
+		phosphor-desk-fill;16;256;128;64;64
+		phosphor-desk-light;16;320;128;64;64
+		phosphor-desk-thin;16;384;128;64;64
+		phosphor-desk;16;448;128;64;64
+		phosphor-desktop-bold;16;512;128;64;64
+		phosphor-desktop-duotone;16;576;128;64;64
+		phosphor-desktop-fill;16;640;128;64;64
+		phosphor-desktop-light;16;704;128;64;64
+		phosphor-desktop-thin;16;768;128;64;64
+		phosphor-desktop-tower-bold;16;832;128;64;64
+		phosphor-desktop-tower-duotone;16;896;128;64;64
+		phosphor-desktop-tower-fill;16;960;128;64;64
+		phosphor-desktop-tower-light;16;0;192;64;64
+		phosphor-desktop-tower-thin;16;64;192;64;64
+		phosphor-desktop-tower;16;128;192;64;64
+		phosphor-desktop;16;192;192;64;64
+		phosphor-detective-bold;16;256;192;64;64
+		phosphor-detective-duotone;16;320;192;64;64
+		phosphor-detective-fill;16;384;192;64;64
+		phosphor-detective-light;16;448;192;64;64
+		phosphor-detective-thin;16;512;192;64;64
+		phosphor-detective;16;576;192;64;64
+		phosphor-dev-to-logo-bold;16;640;192;64;64
+		phosphor-dev-to-logo-duotone;16;704;192;64;64
+		phosphor-dev-to-logo-fill;16;768;192;64;64
+		phosphor-dev-to-logo-light;16;832;192;64;64
+		phosphor-dev-to-logo-thin;16;896;192;64;64
+		phosphor-dev-to-logo;16;960;192;64;64
+		phosphor-device-mobile-bold;16;0;256;64;64
+		phosphor-device-mobile-camera-bold;16;64;256;64;64
+		phosphor-device-mobile-camera-duotone;16;128;256;64;64
+		phosphor-device-mobile-camera-fill;16;192;256;64;64
+		phosphor-device-mobile-camera-light;16;256;256;64;64
+		phosphor-device-mobile-camera-thin;16;320;256;64;64
+		phosphor-device-mobile-camera;16;384;256;64;64
+		phosphor-device-mobile-duotone;16;448;256;64;64
+		phosphor-device-mobile-fill;16;512;256;64;64
+		phosphor-device-mobile-light;16;576;256;64;64
+		phosphor-device-mobile-slash-bold;16;640;256;64;64
+		phosphor-device-mobile-slash-duotone;16;704;256;64;64
+		phosphor-device-mobile-slash-fill;16;768;256;64;64
+		phosphor-device-mobile-slash-light;16;832;256;64;64
+		phosphor-device-mobile-slash-thin;16;896;256;64;64
+		phosphor-device-mobile-slash;16;960;256;64;64
+		phosphor-device-mobile-speaker-bold;16;0;320;64;64
+		phosphor-device-mobile-speaker-duotone;16;64;320;64;64
+		phosphor-device-mobile-speaker-fill;16;128;320;64;64
+		phosphor-device-mobile-speaker-light;16;192;320;64;64
+		phosphor-device-mobile-speaker-thin;16;256;320;64;64
+		phosphor-device-mobile-speaker;16;320;320;64;64
+		phosphor-device-mobile-thin;16;384;320;64;64
+		phosphor-device-mobile;16;448;320;64;64
+		phosphor-device-rotate-bold;16;512;320;64;64
+		phosphor-device-rotate-duotone;16;576;320;64;64
+		phosphor-device-rotate-fill;16;640;320;64;64
+		phosphor-device-rotate-light;16;704;320;64;64
+		phosphor-device-rotate-thin;16;768;320;64;64
+		phosphor-device-rotate;16;832;320;64;64
+		phosphor-device-tablet-bold;16;896;320;64;64
+		phosphor-device-tablet-camera-bold;16;960;320;64;64
+		phosphor-device-tablet-camera-duotone;16;0;384;64;64
+		phosphor-device-tablet-camera-fill;16;64;384;64;64
+		phosphor-device-tablet-camera-light;16;128;384;64;64
+		phosphor-device-tablet-camera-thin;16;192;384;64;64
+		phosphor-device-tablet-camera;16;256;384;64;64
+		phosphor-device-tablet-duotone;16;320;384;64;64
+		phosphor-device-tablet-fill;16;384;384;64;64
+		phosphor-device-tablet-light;16;448;384;64;64
+		phosphor-device-tablet-speaker-bold;16;512;384;64;64
+		phosphor-device-tablet-speaker-duotone;16;576;384;64;64
+		phosphor-device-tablet-speaker-fill;16;640;384;64;64
+		phosphor-device-tablet-speaker-light;16;704;384;64;64
+		phosphor-device-tablet-speaker-thin;16;768;384;64;64
+		phosphor-device-tablet-speaker;16;832;384;64;64
+		phosphor-device-tablet-thin;16;896;384;64;64
+		phosphor-device-tablet;16;960;384;64;64
+		phosphor-devices-bold;16;0;448;64;64
+		phosphor-devices-duotone;16;64;448;64;64
+		phosphor-devices-fill;16;128;448;64;64
+		phosphor-devices-light;16;192;448;64;64
+		phosphor-devices-thin;16;256;448;64;64
+		phosphor-devices;16;320;448;64;64
+		phosphor-diamond-bold;16;384;448;64;64
+		phosphor-diamond-duotone;16;448;448;64;64
+		phosphor-diamond-fill;16;512;448;64;64
+		phosphor-diamond-light;16;576;448;64;64
+		phosphor-diamond-thin;16;640;448;64;64
+		phosphor-diamond;16;704;448;64;64
+		phosphor-diamonds-four-bold;16;768;448;64;64
+		phosphor-diamonds-four-duotone;16;832;448;64;64
+		phosphor-diamonds-four-fill;16;896;448;64;64
+		phosphor-diamonds-four-light;16;960;448;64;64
+		phosphor-diamonds-four-thin;16;0;512;64;64
+		phosphor-diamonds-four;16;64;512;64;64
+		phosphor-dice-five-bold;16;128;512;64;64
+		phosphor-dice-five-duotone;16;192;512;64;64
+		phosphor-dice-five-fill;16;256;512;64;64
+		phosphor-dice-five-light;16;320;512;64;64
+		phosphor-dice-five-thin;16;384;512;64;64
+		phosphor-dice-five;16;448;512;64;64
+		phosphor-dice-four-bold;16;512;512;64;64
+		phosphor-dice-four-duotone;16;576;512;64;64
+		phosphor-dice-four-fill;16;640;512;64;64
+		phosphor-dice-four-light;16;704;512;64;64
+		phosphor-dice-four-thin;16;768;512;64;64
+		phosphor-dice-four;16;832;512;64;64
+		phosphor-dice-one-bold;16;896;512;64;64
+		phosphor-dice-one-duotone;16;960;512;64;64
+		phosphor-dice-one-fill;16;0;576;64;64
+		phosphor-dice-one-light;16;64;576;64;64
+		phosphor-dice-one-thin;16;128;576;64;64
+		phosphor-dice-one;16;192;576;64;64
+		phosphor-dice-six-bold;16;256;576;64;64
+		phosphor-dice-six-duotone;16;320;576;64;64
+		phosphor-dice-six-fill;16;384;576;64;64
+		phosphor-dice-six-light;16;448;576;64;64
+		phosphor-dice-six-thin;16;512;576;64;64
+		phosphor-dice-six;16;576;576;64;64
+		phosphor-dice-three-bold;16;640;576;64;64
+		phosphor-dice-three-duotone;16;704;576;64;64
+		phosphor-dice-three-fill;16;768;576;64;64
+		phosphor-dice-three-light;16;832;576;64;64
+		phosphor-dice-three-thin;16;896;576;64;64
+		phosphor-dice-three;16;960;576;64;64
+		phosphor-dice-two-bold;16;0;640;64;64
+		phosphor-dice-two-duotone;16;64;640;64;64
+		phosphor-dice-two-fill;16;128;640;64;64
+		phosphor-dice-two-light;16;192;640;64;64
+		phosphor-dice-two-thin;16;256;640;64;64
+		phosphor-dice-two;16;320;640;64;64
+		phosphor-disc-bold;16;384;640;64;64
+		phosphor-disc-duotone;16;448;640;64;64
+		phosphor-disc-fill;16;512;640;64;64
+		phosphor-disc-light;16;576;640;64;64
+		phosphor-disc-thin;16;640;640;64;64
+		phosphor-disc;16;704;640;64;64
+		phosphor-disco-ball-bold;16;768;640;64;64
+		phosphor-disco-ball-duotone;16;832;640;64;64
+		phosphor-disco-ball-fill;16;896;640;64;64
+		phosphor-disco-ball-light;16;960;640;64;64
+		phosphor-disco-ball-thin;16;0;704;64;64
+		phosphor-disco-ball;16;64;704;64;64
+		phosphor-discord-logo-bold;16;128;704;64;64
+		phosphor-discord-logo-duotone;16;192;704;64;64
+		phosphor-discord-logo-fill;16;256;704;64;64
+		phosphor-discord-logo-light;16;320;704;64;64
+		phosphor-discord-logo-thin;16;384;704;64;64
+		phosphor-discord-logo;16;448;704;64;64
+		phosphor-divide-bold;16;512;704;64;64
+		phosphor-divide-duotone;16;576;704;64;64
+		phosphor-divide-fill;16;640;704;64;64
+		phosphor-divide-light;16;704;704;64;64
+		phosphor-divide-thin;16;768;704;64;64
+		phosphor-divide;16;832;704;64;64
+		phosphor-dna-bold;16;896;704;64;64
+		phosphor-dna-duotone;16;960;704;64;64
+		phosphor-dna-fill;16;0;768;64;64
+		phosphor-dna-light;16;64;768;64;64
+		phosphor-dna-thin;16;128;768;64;64
+		phosphor-dna;16;192;768;64;64
+		phosphor-dog-bold;16;256;768;64;64
+		phosphor-dog-duotone;16;320;768;64;64
+		phosphor-dog-fill;16;384;768;64;64
+		phosphor-dog-light;16;448;768;64;64
+		phosphor-dog-thin;16;512;768;64;64
+		phosphor-dog;16;576;768;64;64
+		phosphor-door-bold;16;640;768;64;64
+		phosphor-door-duotone;16;704;768;64;64
+		phosphor-door-fill;16;768;768;64;64
+		phosphor-door-light;16;832;768;64;64
+		phosphor-door-open-bold;16;896;768;64;64
+		phosphor-door-open-duotone;16;960;768;64;64
+		phosphor-door-open-fill;16;0;832;64;64
+		phosphor-door-open-light;16;64;832;64;64
+		phosphor-door-open-thin;16;128;832;64;64
+		phosphor-door-open;16;192;832;64;64
+		phosphor-door-thin;16;256;832;64;64
+		phosphor-door;16;320;832;64;64
+		phosphor-dot-bold;16;384;832;64;64
+		phosphor-dot-duotone;16;448;832;64;64
+		phosphor-dot-fill;16;512;832;64;64
+		phosphor-dot-light;16;576;832;64;64
+		phosphor-dot-outline-bold;16;640;832;64;64
+		phosphor-dot-outline-duotone;16;704;832;64;64
+		phosphor-dot-outline-fill;16;768;832;64;64
+		phosphor-dot-outline-light;16;832;832;64;64
+		phosphor-dot-outline-thin;16;896;832;64;64
+		phosphor-dot-outline;16;960;832;64;64
+		phosphor-dot-thin;16;0;896;64;64
+		phosphor-dot;16;64;896;64;64
+		phosphor-dots-nine-bold;16;128;896;64;64
+		phosphor-dots-nine-duotone;16;192;896;64;64
+		phosphor-dots-nine-fill;16;256;896;64;64
+		phosphor-dots-nine-light;16;320;896;64;64
+		phosphor-dots-nine-thin;16;384;896;64;64
+		phosphor-dots-nine;16;448;896;64;64
+		phosphor-dots-six-bold;16;512;896;64;64
+		phosphor-dots-six-duotone;16;576;896;64;64
+		phosphor-dots-six-fill;16;640;896;64;64
+		phosphor-dots-six-light;16;704;896;64;64
+		phosphor-dots-six-thin;16;768;896;64;64
+		phosphor-dots-six-vertical-bold;16;832;896;64;64
+		phosphor-dots-six-vertical-duotone;16;896;896;64;64
+		phosphor-dots-six-vertical-fill;16;960;896;64;64
+		phosphor-dots-six-vertical-light;16;0;960;64;64
+		phosphor-dots-six-vertical-thin;16;64;960;64;64
+		phosphor-dots-six-vertical;16;128;960;64;64
+		phosphor-dots-six;16;192;960;64;64
+		phosphor-dots-three-bold;16;256;960;64;64
+		phosphor-dots-three-circle-bold;16;320;960;64;64
+		phosphor-dots-three-circle-duotone;16;384;960;64;64
+		phosphor-dots-three-circle-fill;16;448;960;64;64
+		phosphor-dots-three-circle-light;16;512;960;64;64
+		phosphor-dots-three-circle-thin;16;576;960;64;64
+		phosphor-dots-three-circle-vertical-bold;16;640;960;64;64
+		phosphor-dots-three-circle-vertical-duotone;16;704;960;64;64
+		phosphor-dots-three-circle-vertical-fill;16;768;960;64;64
+		phosphor-dots-three-circle-vertical-light;16;832;960;64;64
+		phosphor-dots-three-circle-vertical-thin;16;896;960;64;64
+		phosphor-dots-three-circle-vertical;16;960;960;64;64
+		phosphor-dots-three-circle;17;0;0;64;64
+		phosphor-dots-three-duotone;17;64;0;64;64
+		phosphor-dots-three-fill;17;128;0;64;64
+		phosphor-dots-three-light;17;192;0;64;64
+		phosphor-dots-three-outline-bold;17;256;0;64;64
+		phosphor-dots-three-outline-duotone;17;320;0;64;64
+		phosphor-dots-three-outline-fill;17;384;0;64;64
+		phosphor-dots-three-outline-light;17;448;0;64;64
+		phosphor-dots-three-outline-thin;17;512;0;64;64
+		phosphor-dots-three-outline-vertical-bold;17;576;0;64;64
+		phosphor-dots-three-outline-vertical-duotone;17;640;0;64;64
+		phosphor-dots-three-outline-vertical-fill;17;704;0;64;64
+		phosphor-dots-three-outline-vertical-light;17;768;0;64;64
+		phosphor-dots-three-outline-vertical-thin;17;832;0;64;64
+		phosphor-dots-three-outline-vertical;17;896;0;64;64
+		phosphor-dots-three-outline;17;960;0;64;64
+		phosphor-dots-three-thin;17;0;64;64;64
+		phosphor-dots-three-vertical-bold;17;64;64;64;64
+		phosphor-dots-three-vertical-duotone;17;128;64;64;64
+		phosphor-dots-three-vertical-fill;17;192;64;64;64
+		phosphor-dots-three-vertical-light;17;256;64;64;64
+		phosphor-dots-three-vertical-thin;17;320;64;64;64
+		phosphor-dots-three-vertical;17;384;64;64;64
+		phosphor-dots-three;17;448;64;64;64
+		phosphor-download-bold;17;512;64;64;64
+		phosphor-download-duotone;17;576;64;64;64
+		phosphor-download-fill;17;640;64;64;64
+		phosphor-download-light;17;704;64;64;64
+		phosphor-download-simple-bold;17;768;64;64;64
+		phosphor-download-simple-duotone;17;832;64;64;64
+		phosphor-download-simple-fill;17;896;64;64;64
+		phosphor-download-simple-light;17;960;64;64;64
+		phosphor-download-simple-thin;17;0;128;64;64
+		phosphor-download-simple;17;64;128;64;64
+		phosphor-download-thin;17;128;128;64;64
+		phosphor-download;17;192;128;64;64
+		phosphor-dress-bold;17;256;128;64;64
+		phosphor-dress-duotone;17;320;128;64;64
+		phosphor-dress-fill;17;384;128;64;64
+		phosphor-dress-light;17;448;128;64;64
+		phosphor-dress-thin;17;512;128;64;64
+		phosphor-dress;17;576;128;64;64
+		phosphor-dresser-bold;17;640;128;64;64
+		phosphor-dresser-duotone;17;704;128;64;64
+		phosphor-dresser-fill;17;768;128;64;64
+		phosphor-dresser-light;17;832;128;64;64
+		phosphor-dresser-thin;17;896;128;64;64
+		phosphor-dresser;17;960;128;64;64
+		phosphor-dribbble-logo-bold;17;0;192;64;64
+		phosphor-dribbble-logo-duotone;17;64;192;64;64
+		phosphor-dribbble-logo-fill;17;128;192;64;64
+		phosphor-dribbble-logo-light;17;192;192;64;64
+		phosphor-dribbble-logo-thin;17;256;192;64;64
+		phosphor-dribbble-logo;17;320;192;64;64
+		phosphor-drone-bold;17;384;192;64;64
+		phosphor-drone-duotone;17;448;192;64;64
+		phosphor-drone-fill;17;512;192;64;64
+		phosphor-drone-light;17;576;192;64;64
+		phosphor-drone-thin;17;640;192;64;64
+		phosphor-drone;17;704;192;64;64
+		phosphor-drop-bold;17;768;192;64;64
+		phosphor-drop-duotone;17;832;192;64;64
+		phosphor-drop-fill;17;896;192;64;64
+		phosphor-drop-half-bold;17;960;192;64;64
+		phosphor-drop-half-bottom-bold;17;0;256;64;64
+		phosphor-drop-half-bottom-duotone;17;64;256;64;64
+		phosphor-drop-half-bottom-fill;17;128;256;64;64
+		phosphor-drop-half-bottom-light;17;192;256;64;64
+		phosphor-drop-half-bottom-thin;17;256;256;64;64
+		phosphor-drop-half-bottom;17;320;256;64;64
+		phosphor-drop-half-duotone;17;384;256;64;64
+		phosphor-drop-half-fill;17;448;256;64;64
+		phosphor-drop-half-light;17;512;256;64;64
+		phosphor-drop-half-thin;17;576;256;64;64
+		phosphor-drop-half;17;640;256;64;64
+		phosphor-drop-light;17;704;256;64;64
+		phosphor-drop-simple-bold;17;768;256;64;64
+		phosphor-drop-simple-duotone;17;832;256;64;64
+		phosphor-drop-simple-fill;17;896;256;64;64
+		phosphor-drop-simple-light;17;960;256;64;64
+		phosphor-drop-simple-thin;17;0;320;64;64
+		phosphor-drop-simple;17;64;320;64;64
+		phosphor-drop-slash-bold;17;128;320;64;64
+		phosphor-drop-slash-duotone;17;192;320;64;64
+		phosphor-drop-slash-fill;17;256;320;64;64
+		phosphor-drop-slash-light;17;320;320;64;64
+		phosphor-drop-slash-thin;17;384;320;64;64
+		phosphor-drop-slash;17;448;320;64;64
+		phosphor-drop-thin;17;512;320;64;64
+		phosphor-drop;17;576;320;64;64
+		phosphor-dropbox-logo-bold;17;640;320;64;64
+		phosphor-dropbox-logo-duotone;17;704;320;64;64
+		phosphor-dropbox-logo-fill;17;768;320;64;64
+		phosphor-dropbox-logo-light;17;832;320;64;64
+		phosphor-dropbox-logo-thin;17;896;320;64;64
+		phosphor-dropbox-logo;17;960;320;64;64
+		phosphor-ear-bold;17;0;384;64;64
+		phosphor-ear-duotone;17;64;384;64;64
+		phosphor-ear-fill;17;128;384;64;64
+		phosphor-ear-light;17;192;384;64;64
+		phosphor-ear-slash-bold;17;256;384;64;64
+		phosphor-ear-slash-duotone;17;320;384;64;64
+		phosphor-ear-slash-fill;17;384;384;64;64
+		phosphor-ear-slash-light;17;448;384;64;64
+		phosphor-ear-slash-thin;17;512;384;64;64
+		phosphor-ear-slash;17;576;384;64;64
+		phosphor-ear-thin;17;640;384;64;64
+		phosphor-ear;17;704;384;64;64
+		phosphor-egg-bold;17;768;384;64;64
+		phosphor-egg-crack-bold;17;832;384;64;64
+		phosphor-egg-crack-duotone;17;896;384;64;64
+		phosphor-egg-crack-fill;17;960;384;64;64
+		phosphor-egg-crack-light;17;0;448;64;64
+		phosphor-egg-crack-thin;17;64;448;64;64
+		phosphor-egg-crack;17;128;448;64;64
+		phosphor-egg-duotone;17;192;448;64;64
+		phosphor-egg-fill;17;256;448;64;64
+		phosphor-egg-light;17;320;448;64;64
+		phosphor-egg-thin;17;384;448;64;64
+		phosphor-egg;17;448;448;64;64
+		phosphor-eject-bold;17;512;448;64;64
+		phosphor-eject-duotone;17;576;448;64;64
+		phosphor-eject-fill;17;640;448;64;64
+		phosphor-eject-light;17;704;448;64;64
+		phosphor-eject-simple-bold;17;768;448;64;64
+		phosphor-eject-simple-duotone;17;832;448;64;64
+		phosphor-eject-simple-fill;17;896;448;64;64
+		phosphor-eject-simple-light;17;960;448;64;64
+		phosphor-eject-simple-thin;17;0;512;64;64
+		phosphor-eject-simple;17;64;512;64;64
+		phosphor-eject-thin;17;128;512;64;64
+		phosphor-eject;17;192;512;64;64
+		phosphor-elevator-bold;17;256;512;64;64
+		phosphor-elevator-duotone;17;320;512;64;64
+		phosphor-elevator-fill;17;384;512;64;64
+		phosphor-elevator-light;17;448;512;64;64
+		phosphor-elevator-thin;17;512;512;64;64
+		phosphor-elevator;17;576;512;64;64
+		phosphor-empty-bold;17;640;512;64;64
+		phosphor-empty-duotone;17;704;512;64;64
+		phosphor-empty-fill;17;768;512;64;64
+		phosphor-empty-light;17;832;512;64;64
+		phosphor-empty-thin;17;896;512;64;64
+		phosphor-empty;17;960;512;64;64
+		phosphor-engine-bold;17;0;576;64;64
+		phosphor-engine-duotone;17;64;576;64;64
+		phosphor-engine-fill;17;128;576;64;64
+		phosphor-engine-light;17;192;576;64;64
+		phosphor-engine-thin;17;256;576;64;64
+		phosphor-engine;17;320;576;64;64
+		phosphor-envelope-bold;17;384;576;64;64
+		phosphor-envelope-duotone;17;448;576;64;64
+		phosphor-envelope-fill;17;512;576;64;64
+		phosphor-envelope-light;17;576;576;64;64
+		phosphor-envelope-open-bold;17;640;576;64;64
+		phosphor-envelope-open-duotone;17;704;576;64;64
+		phosphor-envelope-open-fill;17;768;576;64;64
+		phosphor-envelope-open-light;17;832;576;64;64
+		phosphor-envelope-open-thin;17;896;576;64;64
+		phosphor-envelope-open;17;960;576;64;64
+		phosphor-envelope-simple-bold;17;0;640;64;64
+		phosphor-envelope-simple-duotone;17;64;640;64;64
+		phosphor-envelope-simple-fill;17;128;640;64;64
+		phosphor-envelope-simple-light;17;192;640;64;64
+		phosphor-envelope-simple-open-bold;17;256;640;64;64
+		phosphor-envelope-simple-open-duotone;17;320;640;64;64
+		phosphor-envelope-simple-open-fill;17;384;640;64;64
+		phosphor-envelope-simple-open-light;17;448;640;64;64
+		phosphor-envelope-simple-open-thin;17;512;640;64;64
+		phosphor-envelope-simple-open;17;576;640;64;64
+		phosphor-envelope-simple-thin;17;640;640;64;64
+		phosphor-envelope-simple;17;704;640;64;64
+		phosphor-envelope-thin;17;768;640;64;64
+		phosphor-envelope;17;832;640;64;64
+		phosphor-equalizer-bold;17;896;640;64;64
+		phosphor-equalizer-duotone;17;960;640;64;64
+		phosphor-equalizer-fill;17;0;704;64;64
+		phosphor-equalizer-light;17;64;704;64;64
+		phosphor-equalizer-thin;17;128;704;64;64
+		phosphor-equalizer;17;192;704;64;64
+		phosphor-equals-bold;17;256;704;64;64
+		phosphor-equals-duotone;17;320;704;64;64
+		phosphor-equals-fill;17;384;704;64;64
+		phosphor-equals-light;17;448;704;64;64
+		phosphor-equals-thin;17;512;704;64;64
+		phosphor-equals;17;576;704;64;64
+		phosphor-eraser-bold;17;640;704;64;64
+		phosphor-eraser-duotone;17;704;704;64;64
+		phosphor-eraser-fill;17;768;704;64;64
+		phosphor-eraser-light;17;832;704;64;64
+		phosphor-eraser-thin;17;896;704;64;64
+		phosphor-eraser;17;960;704;64;64
+		phosphor-escalator-down-bold;17;0;768;64;64
+		phosphor-escalator-down-duotone;17;64;768;64;64
+		phosphor-escalator-down-fill;17;128;768;64;64
+		phosphor-escalator-down-light;17;192;768;64;64
+		phosphor-escalator-down-thin;17;256;768;64;64
+		phosphor-escalator-down;17;320;768;64;64
+		phosphor-escalator-up-bold;17;384;768;64;64
+		phosphor-escalator-up-duotone;17;448;768;64;64
+		phosphor-escalator-up-fill;17;512;768;64;64
+		phosphor-escalator-up-light;17;576;768;64;64
+		phosphor-escalator-up-thin;17;640;768;64;64
+		phosphor-escalator-up;17;704;768;64;64
+		phosphor-exam-bold;17;768;768;64;64
+		phosphor-exam-duotone;17;832;768;64;64
+		phosphor-exam-fill;17;896;768;64;64
+		phosphor-exam-light;17;960;768;64;64
+		phosphor-exam-thin;17;0;832;64;64
+		phosphor-exam;17;64;832;64;64
+		phosphor-exclamation-mark-bold;17;128;832;64;64
+		phosphor-exclamation-mark-duotone;17;192;832;64;64
+		phosphor-exclamation-mark-fill;17;256;832;64;64
+		phosphor-exclamation-mark-light;17;320;832;64;64
+		phosphor-exclamation-mark-thin;17;384;832;64;64
+		phosphor-exclamation-mark;17;448;832;64;64
+		phosphor-exclude-bold;17;512;832;64;64
+		phosphor-exclude-duotone;17;576;832;64;64
+		phosphor-exclude-fill;17;640;832;64;64
+		phosphor-exclude-light;17;704;832;64;64
+		phosphor-exclude-square-bold;17;768;832;64;64
+		phosphor-exclude-square-duotone;17;832;832;64;64
+		phosphor-exclude-square-fill;17;896;832;64;64
+		phosphor-exclude-square-light;17;960;832;64;64
+		phosphor-exclude-square-thin;17;0;896;64;64
+		phosphor-exclude-square;17;64;896;64;64
+		phosphor-exclude-thin;17;128;896;64;64
+		phosphor-exclude;17;192;896;64;64
+		phosphor-export-bold;17;256;896;64;64
+		phosphor-export-duotone;17;320;896;64;64
+		phosphor-export-fill;17;384;896;64;64
+		phosphor-export-light;17;448;896;64;64
+		phosphor-export-thin;17;512;896;64;64
+		phosphor-export;17;576;896;64;64
+		phosphor-eye-bold;17;640;896;64;64
+		phosphor-eye-closed-bold;17;704;896;64;64
+		phosphor-eye-closed-duotone;17;768;896;64;64
+		phosphor-eye-closed-fill;17;832;896;64;64
+		phosphor-eye-closed-light;17;896;896;64;64
+		phosphor-eye-closed-thin;17;960;896;64;64
+		phosphor-eye-closed;17;0;960;64;64
+		phosphor-eye-duotone;17;64;960;64;64
+		phosphor-eye-fill;17;128;960;64;64
+		phosphor-eye-light;17;192;960;64;64
+		phosphor-eye-slash-bold;17;256;960;64;64
+		phosphor-eye-slash-duotone;17;320;960;64;64
+		phosphor-eye-slash-fill;17;384;960;64;64
+		phosphor-eye-slash-light;17;448;960;64;64
+		phosphor-eye-slash-thin;17;512;960;64;64
+		phosphor-eye-slash;17;576;960;64;64
+		phosphor-eye-thin;17;640;960;64;64
+		phosphor-eye;17;704;960;64;64
+		phosphor-eyedropper-bold;17;768;960;64;64
+		phosphor-eyedropper-duotone;17;832;960;64;64
+		phosphor-eyedropper-fill;17;896;960;64;64
+		phosphor-eyedropper-light;17;960;960;64;64
+		phosphor-eyedropper-sample-bold;18;0;0;64;64
+		phosphor-eyedropper-sample-duotone;18;64;0;64;64
+		phosphor-eyedropper-sample-fill;18;128;0;64;64
+		phosphor-eyedropper-sample-light;18;192;0;64;64
+		phosphor-eyedropper-sample-thin;18;256;0;64;64
+		phosphor-eyedropper-sample;18;320;0;64;64
+		phosphor-eyedropper-thin;18;384;0;64;64
+		phosphor-eyedropper;18;448;0;64;64
+		phosphor-eyeglasses-bold;18;512;0;64;64
+		phosphor-eyeglasses-duotone;18;576;0;64;64
+		phosphor-eyeglasses-fill;18;640;0;64;64
+		phosphor-eyeglasses-light;18;704;0;64;64
+		phosphor-eyeglasses-thin;18;768;0;64;64
+		phosphor-eyeglasses;18;832;0;64;64
+		phosphor-eyes-bold;18;896;0;64;64
+		phosphor-eyes-duotone;18;960;0;64;64
+		phosphor-eyes-fill;18;0;64;64;64
+		phosphor-eyes-light;18;64;64;64;64
+		phosphor-eyes-thin;18;128;64;64;64
+		phosphor-eyes;18;192;64;64;64
+		phosphor-face-mask-bold;18;256;64;64;64
+		phosphor-face-mask-duotone;18;320;64;64;64
+		phosphor-face-mask-fill;18;384;64;64;64
+		phosphor-face-mask-light;18;448;64;64;64
+		phosphor-face-mask-thin;18;512;64;64;64
+		phosphor-face-mask;18;576;64;64;64
+		phosphor-facebook-logo-bold;18;640;64;64;64
+		phosphor-facebook-logo-duotone;18;704;64;64;64
+		phosphor-facebook-logo-fill;18;768;64;64;64
+		phosphor-facebook-logo-light;18;832;64;64;64
+		phosphor-facebook-logo-thin;18;896;64;64;64
+		phosphor-facebook-logo;18;960;64;64;64
+		phosphor-factory-bold;18;0;128;64;64
+		phosphor-factory-duotone;18;64;128;64;64
+		phosphor-factory-fill;18;128;128;64;64
+		phosphor-factory-light;18;192;128;64;64
+		phosphor-factory-thin;18;256;128;64;64
+		phosphor-factory;18;320;128;64;64
+		phosphor-faders-bold;18;384;128;64;64
+		phosphor-faders-duotone;18;448;128;64;64
+		phosphor-faders-fill;18;512;128;64;64
+		phosphor-faders-horizontal-bold;18;576;128;64;64
+		phosphor-faders-horizontal-duotone;18;640;128;64;64
+		phosphor-faders-horizontal-fill;18;704;128;64;64
+		phosphor-faders-horizontal-light;18;768;128;64;64
+		phosphor-faders-horizontal-thin;18;832;128;64;64
+		phosphor-faders-horizontal;18;896;128;64;64
+		phosphor-faders-light;18;960;128;64;64
+		phosphor-faders-thin;18;0;192;64;64
+		phosphor-faders;18;64;192;64;64
+		phosphor-fallout-shelter-bold;18;128;192;64;64
+		phosphor-fallout-shelter-duotone;18;192;192;64;64
+		phosphor-fallout-shelter-fill;18;256;192;64;64
+		phosphor-fallout-shelter-light;18;320;192;64;64
+		phosphor-fallout-shelter-thin;18;384;192;64;64
+		phosphor-fallout-shelter;18;448;192;64;64
+		phosphor-fan-bold;18;512;192;64;64
+		phosphor-fan-duotone;18;576;192;64;64
+		phosphor-fan-fill;18;640;192;64;64
+		phosphor-fan-light;18;704;192;64;64
+		phosphor-fan-thin;18;768;192;64;64
+		phosphor-fan;18;832;192;64;64
+		phosphor-farm-bold;18;896;192;64;64
+		phosphor-farm-duotone;18;960;192;64;64
+		phosphor-farm-fill;18;0;256;64;64
+		phosphor-farm-light;18;64;256;64;64
+		phosphor-farm-thin;18;128;256;64;64
+		phosphor-farm;18;192;256;64;64
+		phosphor-fast-forward-bold;18;256;256;64;64
+		phosphor-fast-forward-circle-bold;18;320;256;64;64
+		phosphor-fast-forward-circle-duotone;18;384;256;64;64
+		phosphor-fast-forward-circle-fill;18;448;256;64;64
+		phosphor-fast-forward-circle-light;18;512;256;64;64
+		phosphor-fast-forward-circle-thin;18;576;256;64;64
+		phosphor-fast-forward-circle;18;640;256;64;64
+		phosphor-fast-forward-duotone;18;704;256;64;64
+		phosphor-fast-forward-fill;18;768;256;64;64
+		phosphor-fast-forward-light;18;832;256;64;64
+		phosphor-fast-forward-thin;18;896;256;64;64
+		phosphor-fast-forward;18;960;256;64;64
+		phosphor-feather-bold;18;0;320;64;64
+		phosphor-feather-duotone;18;64;320;64;64
+		phosphor-feather-fill;18;128;320;64;64
+		phosphor-feather-light;18;192;320;64;64
+		phosphor-feather-thin;18;256;320;64;64
+		phosphor-feather;18;320;320;64;64
+		phosphor-fediverse-logo-bold;18;384;320;64;64
+		phosphor-fediverse-logo-duotone;18;448;320;64;64
+		phosphor-fediverse-logo-fill;18;512;320;64;64
+		phosphor-fediverse-logo-light;18;576;320;64;64
+		phosphor-fediverse-logo-thin;18;640;320;64;64
+		phosphor-fediverse-logo;18;704;320;64;64
+		phosphor-figma-logo-bold;18;768;320;64;64
+		phosphor-figma-logo-duotone;18;832;320;64;64
+		phosphor-figma-logo-fill;18;896;320;64;64
+		phosphor-figma-logo-light;18;960;320;64;64
+		phosphor-figma-logo-thin;18;0;384;64;64
+		phosphor-figma-logo;18;64;384;64;64
+		phosphor-file-archive-bold;18;128;384;64;64
+		phosphor-file-archive-duotone;18;192;384;64;64
+		phosphor-file-archive-fill;18;256;384;64;64
+		phosphor-file-archive-light;18;320;384;64;64
+		phosphor-file-archive-thin;18;384;384;64;64
+		phosphor-file-archive;18;448;384;64;64
+		phosphor-file-arrow-down-bold;18;512;384;64;64
+		phosphor-file-arrow-down-duotone;18;576;384;64;64
+		phosphor-file-arrow-down-fill;18;640;384;64;64
+		phosphor-file-arrow-down-light;18;704;384;64;64
+		phosphor-file-arrow-down-thin;18;768;384;64;64
+		phosphor-file-arrow-down;18;832;384;64;64
+		phosphor-file-arrow-up-bold;18;896;384;64;64
+		phosphor-file-arrow-up-duotone;18;960;384;64;64
+		phosphor-file-arrow-up-fill;18;0;448;64;64
+		phosphor-file-arrow-up-light;18;64;448;64;64
+		phosphor-file-arrow-up-thin;18;128;448;64;64
+		phosphor-file-arrow-up;18;192;448;64;64
+		phosphor-file-audio-bold;18;256;448;64;64
+		phosphor-file-audio-duotone;18;320;448;64;64
+		phosphor-file-audio-fill;18;384;448;64;64
+		phosphor-file-audio-light;18;448;448;64;64
+		phosphor-file-audio-thin;18;512;448;64;64
+		phosphor-file-audio;18;576;448;64;64
+		phosphor-file-bold;18;640;448;64;64
+		phosphor-file-c-bold;18;704;448;64;64
+		phosphor-file-c-duotone;18;768;448;64;64
+		phosphor-file-c-fill;18;832;448;64;64
+		phosphor-file-c-light;18;896;448;64;64
+		phosphor-file-c-sharp-bold;18;960;448;64;64
+		phosphor-file-c-sharp-duotone;18;0;512;64;64
+		phosphor-file-c-sharp-fill;18;64;512;64;64
+		phosphor-file-c-sharp-light;18;128;512;64;64
+		phosphor-file-c-sharp-thin;18;192;512;64;64
+		phosphor-file-c-sharp;18;256;512;64;64
+		phosphor-file-c-thin;18;320;512;64;64
+		phosphor-file-c;18;384;512;64;64
+		phosphor-file-cloud-bold;18;448;512;64;64
+		phosphor-file-cloud-duotone;18;512;512;64;64
+		phosphor-file-cloud-fill;18;576;512;64;64
+		phosphor-file-cloud-light;18;640;512;64;64
+		phosphor-file-cloud-thin;18;704;512;64;64
+		phosphor-file-cloud;18;768;512;64;64
+		phosphor-file-code-bold;18;832;512;64;64
+		phosphor-file-code-duotone;18;896;512;64;64
+		phosphor-file-code-fill;18;960;512;64;64
+		phosphor-file-code-light;18;0;576;64;64
+		phosphor-file-code-thin;18;64;576;64;64
+		phosphor-file-code;18;128;576;64;64
+		phosphor-file-cpp-bold;18;192;576;64;64
+		phosphor-file-cpp-duotone;18;256;576;64;64
+		phosphor-file-cpp-fill;18;320;576;64;64
+		phosphor-file-cpp-light;18;384;576;64;64
+		phosphor-file-cpp-thin;18;448;576;64;64
+		phosphor-file-cpp;18;512;576;64;64
+		phosphor-file-css-bold;18;576;576;64;64
+		phosphor-file-css-duotone;18;640;576;64;64
+		phosphor-file-css-fill;18;704;576;64;64
+		phosphor-file-css-light;18;768;576;64;64
+		phosphor-file-css-thin;18;832;576;64;64
+		phosphor-file-css;18;896;576;64;64
+		phosphor-file-csv-bold;18;960;576;64;64
+		phosphor-file-csv-duotone;18;0;640;64;64
+		phosphor-file-csv-fill;18;64;640;64;64
+		phosphor-file-csv-light;18;128;640;64;64
+		phosphor-file-csv-thin;18;192;640;64;64
+		phosphor-file-csv;18;256;640;64;64
+		phosphor-file-dashed-bold;18;320;640;64;64
+		phosphor-file-dashed-duotone;18;384;640;64;64
+		phosphor-file-dashed-fill;18;448;640;64;64
+		phosphor-file-dashed-light;18;512;640;64;64
+		phosphor-file-dashed-thin;18;576;640;64;64
+		phosphor-file-dashed;18;640;640;64;64
+		phosphor-file-doc-bold;18;704;640;64;64
+		phosphor-file-doc-duotone;18;768;640;64;64
+		phosphor-file-doc-fill;18;832;640;64;64
+		phosphor-file-doc-light;18;896;640;64;64
+		phosphor-file-doc-thin;18;960;640;64;64
+		phosphor-file-doc;18;0;704;64;64
+		phosphor-file-duotone;18;64;704;64;64
+		phosphor-file-fill;18;128;704;64;64
+		phosphor-file-html-bold;18;192;704;64;64
+		phosphor-file-html-duotone;18;256;704;64;64
+		phosphor-file-html-fill;18;320;704;64;64
+		phosphor-file-html-light;18;384;704;64;64
+		phosphor-file-html-thin;18;448;704;64;64
+		phosphor-file-html;18;512;704;64;64
+		phosphor-file-image-bold;18;576;704;64;64
+		phosphor-file-image-duotone;18;640;704;64;64
+		phosphor-file-image-fill;18;704;704;64;64
+		phosphor-file-image-light;18;768;704;64;64
+		phosphor-file-image-thin;18;832;704;64;64
+		phosphor-file-image;18;896;704;64;64
+		phosphor-file-ini-bold;18;960;704;64;64
+		phosphor-file-ini-duotone;18;0;768;64;64
+		phosphor-file-ini-fill;18;64;768;64;64
+		phosphor-file-ini-light;18;128;768;64;64
+		phosphor-file-ini-thin;18;192;768;64;64
+		phosphor-file-ini;18;256;768;64;64
+		phosphor-file-jpg-bold;18;320;768;64;64
+		phosphor-file-jpg-duotone;18;384;768;64;64
+		phosphor-file-jpg-fill;18;448;768;64;64
+		phosphor-file-jpg-light;18;512;768;64;64
+		phosphor-file-jpg-thin;18;576;768;64;64
+		phosphor-file-jpg;18;640;768;64;64
+		phosphor-file-js-bold;18;704;768;64;64
+		phosphor-file-js-duotone;18;768;768;64;64
+		phosphor-file-js-fill;18;832;768;64;64
+		phosphor-file-js-light;18;896;768;64;64
+		phosphor-file-js-thin;18;960;768;64;64
+		phosphor-file-js;18;0;832;64;64
+		phosphor-file-jsx-bold;18;64;832;64;64
+		phosphor-file-jsx-duotone;18;128;832;64;64
+		phosphor-file-jsx-fill;18;192;832;64;64
+		phosphor-file-jsx-light;18;256;832;64;64
+		phosphor-file-jsx-thin;18;320;832;64;64
+		phosphor-file-jsx;18;384;832;64;64
+		phosphor-file-light;18;448;832;64;64
+		phosphor-file-lock-bold;18;512;832;64;64
+		phosphor-file-lock-duotone;18;576;832;64;64
+		phosphor-file-lock-fill;18;640;832;64;64
+		phosphor-file-lock-light;18;704;832;64;64
+		phosphor-file-lock-thin;18;768;832;64;64
+		phosphor-file-lock;18;832;832;64;64
+		phosphor-file-magnifying-glass-bold;18;896;832;64;64
+		phosphor-file-magnifying-glass-duotone;18;960;832;64;64
+		phosphor-file-magnifying-glass-fill;18;0;896;64;64
+		phosphor-file-magnifying-glass-light;18;64;896;64;64
+		phosphor-file-magnifying-glass-thin;18;128;896;64;64
+		phosphor-file-magnifying-glass;18;192;896;64;64
+		phosphor-file-md-bold;18;256;896;64;64
+		phosphor-file-md-duotone;18;320;896;64;64
+		phosphor-file-md-fill;18;384;896;64;64
+		phosphor-file-md-light;18;448;896;64;64
+		phosphor-file-md-thin;18;512;896;64;64
+		phosphor-file-md;18;576;896;64;64
+		phosphor-file-minus-bold;18;640;896;64;64
+		phosphor-file-minus-duotone;18;704;896;64;64
+		phosphor-file-minus-fill;18;768;896;64;64
+		phosphor-file-minus-light;18;832;896;64;64
+		phosphor-file-minus-thin;18;896;896;64;64
+		phosphor-file-minus;18;960;896;64;64
+		phosphor-file-pdf-bold;18;0;960;64;64
+		phosphor-file-pdf-duotone;18;64;960;64;64
+		phosphor-file-pdf-fill;18;128;960;64;64
+		phosphor-file-pdf-light;18;192;960;64;64
+		phosphor-file-pdf-thin;18;256;960;64;64
+		phosphor-file-pdf;18;320;960;64;64
+		phosphor-file-plus-bold;18;384;960;64;64
+		phosphor-file-plus-duotone;18;448;960;64;64
+		phosphor-file-plus-fill;18;512;960;64;64
+		phosphor-file-plus-light;18;576;960;64;64
+		phosphor-file-plus-thin;18;640;960;64;64
+		phosphor-file-plus;18;704;960;64;64
+		phosphor-file-png-bold;18;768;960;64;64
+		phosphor-file-png-duotone;18;832;960;64;64
+		phosphor-file-png-fill;18;896;960;64;64
+		phosphor-file-png-light;18;960;960;64;64
+		phosphor-file-png-thin;19;0;0;64;64
+		phosphor-file-png;19;64;0;64;64
+		phosphor-file-ppt-bold;19;128;0;64;64
+		phosphor-file-ppt-duotone;19;192;0;64;64
+		phosphor-file-ppt-fill;19;256;0;64;64
+		phosphor-file-ppt-light;19;320;0;64;64
+		phosphor-file-ppt-thin;19;384;0;64;64
+		phosphor-file-ppt;19;448;0;64;64
+		phosphor-file-py-bold;19;512;0;64;64
+		phosphor-file-py-duotone;19;576;0;64;64
+		phosphor-file-py-fill;19;640;0;64;64
+		phosphor-file-py-light;19;704;0;64;64
+		phosphor-file-py-thin;19;768;0;64;64
+		phosphor-file-py;19;832;0;64;64
+		phosphor-file-rs-bold;19;896;0;64;64
+		phosphor-file-rs-duotone;19;960;0;64;64
+		phosphor-file-rs-fill;19;0;64;64;64
+		phosphor-file-rs-light;19;64;64;64;64
+		phosphor-file-rs-thin;19;128;64;64;64
+		phosphor-file-rs;19;192;64;64;64
+		phosphor-file-sql-bold;19;256;64;64;64
+		phosphor-file-sql-duotone;19;320;64;64;64
+		phosphor-file-sql-fill;19;384;64;64;64
+		phosphor-file-sql-light;19;448;64;64;64
+		phosphor-file-sql-thin;19;512;64;64;64
+		phosphor-file-sql;19;576;64;64;64
+		phosphor-file-svg-bold;19;640;64;64;64
+		phosphor-file-svg-duotone;19;704;64;64;64
+		phosphor-file-svg-fill;19;768;64;64;64
+		phosphor-file-svg-light;19;832;64;64;64
+		phosphor-file-svg-thin;19;896;64;64;64
+		phosphor-file-svg;19;960;64;64;64
+		phosphor-file-text-bold;19;0;128;64;64
+		phosphor-file-text-duotone;19;64;128;64;64
+		phosphor-file-text-fill;19;128;128;64;64
+		phosphor-file-text-light;19;192;128;64;64
+		phosphor-file-text-thin;19;256;128;64;64
+		phosphor-file-text;19;320;128;64;64
+		phosphor-file-thin;19;384;128;64;64
+		phosphor-file-ts-bold;19;448;128;64;64
+		phosphor-file-ts-duotone;19;512;128;64;64
+		phosphor-file-ts-fill;19;576;128;64;64
+		phosphor-file-ts-light;19;640;128;64;64
+		phosphor-file-ts-thin;19;704;128;64;64
+		phosphor-file-ts;19;768;128;64;64
+		phosphor-file-tsx-bold;19;832;128;64;64
+		phosphor-file-tsx-duotone;19;896;128;64;64
+		phosphor-file-tsx-fill;19;960;128;64;64
+		phosphor-file-tsx-light;19;0;192;64;64
+		phosphor-file-tsx-thin;19;64;192;64;64
+		phosphor-file-tsx;19;128;192;64;64
+		phosphor-file-txt-bold;19;192;192;64;64
+		phosphor-file-txt-duotone;19;256;192;64;64
+		phosphor-file-txt-fill;19;320;192;64;64
+		phosphor-file-txt-light;19;384;192;64;64
+		phosphor-file-txt-thin;19;448;192;64;64
+		phosphor-file-txt;19;512;192;64;64
+		phosphor-file-video-bold;19;576;192;64;64
+		phosphor-file-video-duotone;19;640;192;64;64
+		phosphor-file-video-fill;19;704;192;64;64
+		phosphor-file-video-light;19;768;192;64;64
+		phosphor-file-video-thin;19;832;192;64;64
+		phosphor-file-video;19;896;192;64;64
+		phosphor-file-vue-bold;19;960;192;64;64
+		phosphor-file-vue-duotone;19;0;256;64;64
+		phosphor-file-vue-fill;19;64;256;64;64
+		phosphor-file-vue-light;19;128;256;64;64
+		phosphor-file-vue-thin;19;192;256;64;64
+		phosphor-file-vue;19;256;256;64;64
+		phosphor-file-x-bold;19;320;256;64;64
+		phosphor-file-x-duotone;19;384;256;64;64
+		phosphor-file-x-fill;19;448;256;64;64
+		phosphor-file-x-light;19;512;256;64;64
+		phosphor-file-x-thin;19;576;256;64;64
+		phosphor-file-x;19;640;256;64;64
+		phosphor-file-xls-bold;19;704;256;64;64
+		phosphor-file-xls-duotone;19;768;256;64;64
+		phosphor-file-xls-fill;19;832;256;64;64
+		phosphor-file-xls-light;19;896;256;64;64
+		phosphor-file-xls-thin;19;960;256;64;64
+		phosphor-file-xls;19;0;320;64;64
+		phosphor-file-zip-bold;19;64;320;64;64
+		phosphor-file-zip-duotone;19;128;320;64;64
+		phosphor-file-zip-fill;19;192;320;64;64
+		phosphor-file-zip-light;19;256;320;64;64
+		phosphor-file-zip-thin;19;320;320;64;64
+		phosphor-file-zip;19;384;320;64;64
+		phosphor-file;19;448;320;64;64
+		phosphor-files-bold;19;512;320;64;64
+		phosphor-files-duotone;19;576;320;64;64
+		phosphor-files-fill;19;640;320;64;64
+		phosphor-files-light;19;704;320;64;64
+		phosphor-files-thin;19;768;320;64;64
+		phosphor-files;19;832;320;64;64
+		phosphor-film-reel-bold;19;896;320;64;64
+		phosphor-film-reel-duotone;19;960;320;64;64
+		phosphor-film-reel-fill;19;0;384;64;64
+		phosphor-film-reel-light;19;64;384;64;64
+		phosphor-film-reel-thin;19;128;384;64;64
+		phosphor-film-reel;19;192;384;64;64
+		phosphor-film-script-bold;19;256;384;64;64
+		phosphor-film-script-duotone;19;320;384;64;64
+		phosphor-film-script-fill;19;384;384;64;64
+		phosphor-film-script-light;19;448;384;64;64
+		phosphor-film-script-thin;19;512;384;64;64
+		phosphor-film-script;19;576;384;64;64
+		phosphor-film-slate-bold;19;640;384;64;64
+		phosphor-film-slate-duotone;19;704;384;64;64
+		phosphor-film-slate-fill;19;768;384;64;64
+		phosphor-film-slate-light;19;832;384;64;64
+		phosphor-film-slate-thin;19;896;384;64;64
+		phosphor-film-slate;19;960;384;64;64
+		phosphor-film-strip-bold;19;0;448;64;64
+		phosphor-film-strip-duotone;19;64;448;64;64
+		phosphor-film-strip-fill;19;128;448;64;64
+		phosphor-film-strip-light;19;192;448;64;64
+		phosphor-film-strip-thin;19;256;448;64;64
+		phosphor-film-strip;19;320;448;64;64
+		phosphor-fingerprint-bold;19;384;448;64;64
+		phosphor-fingerprint-duotone;19;448;448;64;64
+		phosphor-fingerprint-fill;19;512;448;64;64
+		phosphor-fingerprint-light;19;576;448;64;64
+		phosphor-fingerprint-simple-bold;19;640;448;64;64
+		phosphor-fingerprint-simple-duotone;19;704;448;64;64
+		phosphor-fingerprint-simple-fill;19;768;448;64;64
+		phosphor-fingerprint-simple-light;19;832;448;64;64
+		phosphor-fingerprint-simple-thin;19;896;448;64;64
+		phosphor-fingerprint-simple;19;960;448;64;64
+		phosphor-fingerprint-thin;19;0;512;64;64
+		phosphor-fingerprint;19;64;512;64;64
+		phosphor-finn-the-human-bold;19;128;512;64;64
+		phosphor-finn-the-human-duotone;19;192;512;64;64
+		phosphor-finn-the-human-fill;19;256;512;64;64
+		phosphor-finn-the-human-light;19;320;512;64;64
+		phosphor-finn-the-human-thin;19;384;512;64;64
+		phosphor-finn-the-human;19;448;512;64;64
+		phosphor-fire-bold;19;512;512;64;64
+		phosphor-fire-duotone;19;576;512;64;64
+		phosphor-fire-extinguisher-bold;19;640;512;64;64
+		phosphor-fire-extinguisher-duotone;19;704;512;64;64
+		phosphor-fire-extinguisher-fill;19;768;512;64;64
+		phosphor-fire-extinguisher-light;19;832;512;64;64
+		phosphor-fire-extinguisher-thin;19;896;512;64;64
+		phosphor-fire-extinguisher;19;960;512;64;64
+		phosphor-fire-fill;19;0;576;64;64
+		phosphor-fire-light;19;64;576;64;64
+		phosphor-fire-simple-bold;19;128;576;64;64
+		phosphor-fire-simple-duotone;19;192;576;64;64
+		phosphor-fire-simple-fill;19;256;576;64;64
+		phosphor-fire-simple-light;19;320;576;64;64
+		phosphor-fire-simple-thin;19;384;576;64;64
+		phosphor-fire-simple;19;448;576;64;64
+		phosphor-fire-thin;19;512;576;64;64
+		phosphor-fire-truck-bold;19;576;576;64;64
+		phosphor-fire-truck-duotone;19;640;576;64;64
+		phosphor-fire-truck-fill;19;704;576;64;64
+		phosphor-fire-truck-light;19;768;576;64;64
+		phosphor-fire-truck-thin;19;832;576;64;64
+		phosphor-fire-truck;19;896;576;64;64
+		phosphor-fire;19;960;576;64;64
+		phosphor-first-aid-bold;19;0;640;64;64
+		phosphor-first-aid-duotone;19;64;640;64;64
+		phosphor-first-aid-fill;19;128;640;64;64
+		phosphor-first-aid-kit-bold;19;192;640;64;64
+		phosphor-first-aid-kit-duotone;19;256;640;64;64
+		phosphor-first-aid-kit-fill;19;320;640;64;64
+		phosphor-first-aid-kit-light;19;384;640;64;64
+		phosphor-first-aid-kit-thin;19;448;640;64;64
+		phosphor-first-aid-kit;19;512;640;64;64
+		phosphor-first-aid-light;19;576;640;64;64
+		phosphor-first-aid-thin;19;640;640;64;64
+		phosphor-first-aid;19;704;640;64;64
+		phosphor-fish-bold;19;768;640;64;64
+		phosphor-fish-duotone;19;832;640;64;64
+		phosphor-fish-fill;19;896;640;64;64
+		phosphor-fish-light;19;960;640;64;64
+		phosphor-fish-simple-bold;19;0;704;64;64
+		phosphor-fish-simple-duotone;19;64;704;64;64
+		phosphor-fish-simple-fill;19;128;704;64;64
+		phosphor-fish-simple-light;19;192;704;64;64
+		phosphor-fish-simple-thin;19;256;704;64;64
+		phosphor-fish-simple;19;320;704;64;64
+		phosphor-fish-thin;19;384;704;64;64
+		phosphor-fish;19;448;704;64;64
+		phosphor-flag-banner-bold;19;512;704;64;64
+		phosphor-flag-banner-duotone;19;576;704;64;64
+		phosphor-flag-banner-fill;19;640;704;64;64
+		phosphor-flag-banner-fold-bold;19;704;704;64;64
+		phosphor-flag-banner-fold-duotone;19;768;704;64;64
+		phosphor-flag-banner-fold-fill;19;832;704;64;64
+		phosphor-flag-banner-fold-light;19;896;704;64;64
+		phosphor-flag-banner-fold-thin;19;960;704;64;64
+		phosphor-flag-banner-fold;19;0;768;64;64
+		phosphor-flag-banner-light;19;64;768;64;64
+		phosphor-flag-banner-thin;19;128;768;64;64
+		phosphor-flag-banner;19;192;768;64;64
+		phosphor-flag-bold;19;256;768;64;64
+		phosphor-flag-checkered-bold;19;320;768;64;64
+		phosphor-flag-checkered-duotone;19;384;768;64;64
+		phosphor-flag-checkered-fill;19;448;768;64;64
+		phosphor-flag-checkered-light;19;512;768;64;64
+		phosphor-flag-checkered-thin;19;576;768;64;64
+		phosphor-flag-checkered;19;640;768;64;64
+		phosphor-flag-duotone;19;704;768;64;64
+		phosphor-flag-fill;19;768;768;64;64
+		phosphor-flag-light;19;832;768;64;64
+		phosphor-flag-pennant-bold;19;896;768;64;64
+		phosphor-flag-pennant-duotone;19;960;768;64;64
+		phosphor-flag-pennant-fill;19;0;832;64;64
+		phosphor-flag-pennant-light;19;64;832;64;64
+		phosphor-flag-pennant-thin;19;128;832;64;64
+		phosphor-flag-pennant;19;192;832;64;64
+		phosphor-flag-thin;19;256;832;64;64
+		phosphor-flag;19;320;832;64;64
+		phosphor-flame-bold;19;384;832;64;64
+		phosphor-flame-duotone;19;448;832;64;64
+		phosphor-flame-fill;19;512;832;64;64
+		phosphor-flame-light;19;576;832;64;64
+		phosphor-flame-thin;19;640;832;64;64
+		phosphor-flame;19;704;832;64;64
+		phosphor-flashlight-bold;19;768;832;64;64
+		phosphor-flashlight-duotone;19;832;832;64;64
+		phosphor-flashlight-fill;19;896;832;64;64
+		phosphor-flashlight-light;19;960;832;64;64
+		phosphor-flashlight-thin;19;0;896;64;64
+		phosphor-flashlight;19;64;896;64;64
+		phosphor-flask-bold;19;128;896;64;64
+		phosphor-flask-duotone;19;192;896;64;64
+		phosphor-flask-fill;19;256;896;64;64
+		phosphor-flask-light;19;320;896;64;64
+		phosphor-flask-thin;19;384;896;64;64
+		phosphor-flask;19;448;896;64;64
+		phosphor-flip-horizontal-bold;19;512;896;64;64
+		phosphor-flip-horizontal-duotone;19;576;896;64;64
+		phosphor-flip-horizontal-fill;19;640;896;64;64
+		phosphor-flip-horizontal-light;19;704;896;64;64
+		phosphor-flip-horizontal-thin;19;768;896;64;64
+		phosphor-flip-horizontal;19;832;896;64;64
+		phosphor-flip-vertical-bold;19;896;896;64;64
+		phosphor-flip-vertical-duotone;19;960;896;64;64
+		phosphor-flip-vertical-fill;19;0;960;64;64
+		phosphor-flip-vertical-light;19;64;960;64;64
+		phosphor-flip-vertical-thin;19;128;960;64;64
+		phosphor-flip-vertical;19;192;960;64;64
+		phosphor-floppy-disk-back-bold;19;256;960;64;64
+		phosphor-floppy-disk-back-duotone;19;320;960;64;64
+		phosphor-floppy-disk-back-fill;19;384;960;64;64
+		phosphor-floppy-disk-back-light;19;448;960;64;64
+		phosphor-floppy-disk-back-thin;19;512;960;64;64
+		phosphor-floppy-disk-back;19;576;960;64;64
+		phosphor-floppy-disk-bold;19;640;960;64;64
+		phosphor-floppy-disk-duotone;19;704;960;64;64
+		phosphor-floppy-disk-fill;19;768;960;64;64
+		phosphor-floppy-disk-light;19;832;960;64;64
+		phosphor-floppy-disk-thin;19;896;960;64;64
+		phosphor-floppy-disk;19;960;960;64;64
+		phosphor-flow-arrow-bold;20;0;0;64;64
+		phosphor-flow-arrow-duotone;20;64;0;64;64
+		phosphor-flow-arrow-fill;20;128;0;64;64
+		phosphor-flow-arrow-light;20;192;0;64;64
+		phosphor-flow-arrow-thin;20;256;0;64;64
+		phosphor-flow-arrow;20;320;0;64;64
+		phosphor-flower-bold;20;384;0;64;64
+		phosphor-flower-duotone;20;448;0;64;64
+		phosphor-flower-fill;20;512;0;64;64
+		phosphor-flower-light;20;576;0;64;64
+		phosphor-flower-lotus-bold;20;640;0;64;64
+		phosphor-flower-lotus-duotone;20;704;0;64;64
+		phosphor-flower-lotus-fill;20;768;0;64;64
+		phosphor-flower-lotus-light;20;832;0;64;64
+		phosphor-flower-lotus-thin;20;896;0;64;64
+		phosphor-flower-lotus;20;960;0;64;64
+		phosphor-flower-thin;20;0;64;64;64
+		phosphor-flower-tulip-bold;20;64;64;64;64
+		phosphor-flower-tulip-duotone;20;128;64;64;64
+		phosphor-flower-tulip-fill;20;192;64;64;64
+		phosphor-flower-tulip-light;20;256;64;64;64
+		phosphor-flower-tulip-thin;20;320;64;64;64
+		phosphor-flower-tulip;20;384;64;64;64
+		phosphor-flower;20;448;64;64;64
+		phosphor-flying-saucer-bold;20;512;64;64;64
+		phosphor-flying-saucer-duotone;20;576;64;64;64
+		phosphor-flying-saucer-fill;20;640;64;64;64
+		phosphor-flying-saucer-light;20;704;64;64;64
+		phosphor-flying-saucer-thin;20;768;64;64;64
+		phosphor-flying-saucer;20;832;64;64;64
+		phosphor-folder-bold;20;896;64;64;64
+		phosphor-folder-dashed-bold;20;960;64;64;64
+		phosphor-folder-dashed-duotone;20;0;128;64;64
+		phosphor-folder-dashed-fill;20;64;128;64;64
+		phosphor-folder-dashed-light;20;128;128;64;64
+		phosphor-folder-dashed-thin;20;192;128;64;64
+		phosphor-folder-dashed;20;256;128;64;64
+		phosphor-folder-duotone;20;320;128;64;64
+		phosphor-folder-fill;20;384;128;64;64
+		phosphor-folder-light;20;448;128;64;64
+		phosphor-folder-lock-bold;20;512;128;64;64
+		phosphor-folder-lock-duotone;20;576;128;64;64
+		phosphor-folder-lock-fill;20;640;128;64;64
+		phosphor-folder-lock-light;20;704;128;64;64
+		phosphor-folder-lock-thin;20;768;128;64;64
+		phosphor-folder-lock;20;832;128;64;64
+		phosphor-folder-minus-bold;20;896;128;64;64
+		phosphor-folder-minus-duotone;20;960;128;64;64
+		phosphor-folder-minus-fill;20;0;192;64;64
+		phosphor-folder-minus-light;20;64;192;64;64
+		phosphor-folder-minus-thin;20;128;192;64;64
+		phosphor-folder-minus;20;192;192;64;64
+		phosphor-folder-open-bold;20;256;192;64;64
+		phosphor-folder-open-duotone;20;320;192;64;64
+		phosphor-folder-open-fill;20;384;192;64;64
+		phosphor-folder-open-light;20;448;192;64;64
+		phosphor-folder-open-thin;20;512;192;64;64
+		phosphor-folder-open;20;576;192;64;64
+		phosphor-folder-plus-bold;20;640;192;64;64
+		phosphor-folder-plus-duotone;20;704;192;64;64
+		phosphor-folder-plus-fill;20;768;192;64;64
+		phosphor-folder-plus-light;20;832;192;64;64
+		phosphor-folder-plus-thin;20;896;192;64;64
+		phosphor-folder-plus;20;960;192;64;64
+		phosphor-folder-simple-bold;20;0;256;64;64
+		phosphor-folder-simple-dashed-bold;20;64;256;64;64
+		phosphor-folder-simple-dashed-duotone;20;128;256;64;64
+		phosphor-folder-simple-dashed-fill;20;192;256;64;64
+		phosphor-folder-simple-dashed-light;20;256;256;64;64
+		phosphor-folder-simple-dashed-thin;20;320;256;64;64
+		phosphor-folder-simple-dashed;20;384;256;64;64
+		phosphor-folder-simple-duotone;20;448;256;64;64
+		phosphor-folder-simple-fill;20;512;256;64;64
+		phosphor-folder-simple-light;20;576;256;64;64
+		phosphor-folder-simple-lock-bold;20;640;256;64;64
+		phosphor-folder-simple-lock-duotone;20;704;256;64;64
+		phosphor-folder-simple-lock-fill;20;768;256;64;64
+		phosphor-folder-simple-lock-light;20;832;256;64;64
+		phosphor-folder-simple-lock-thin;20;896;256;64;64
+		phosphor-folder-simple-lock;20;960;256;64;64
+		phosphor-folder-simple-minus-bold;20;0;320;64;64
+		phosphor-folder-simple-minus-duotone;20;64;320;64;64
+		phosphor-folder-simple-minus-fill;20;128;320;64;64
+		phosphor-folder-simple-minus-light;20;192;320;64;64
+		phosphor-folder-simple-minus-thin;20;256;320;64;64
+		phosphor-folder-simple-minus;20;320;320;64;64
+		phosphor-folder-simple-plus-bold;20;384;320;64;64
+		phosphor-folder-simple-plus-duotone;20;448;320;64;64
+		phosphor-folder-simple-plus-fill;20;512;320;64;64
+		phosphor-folder-simple-plus-light;20;576;320;64;64
+		phosphor-folder-simple-plus-thin;20;640;320;64;64
+		phosphor-folder-simple-plus;20;704;320;64;64
+		phosphor-folder-simple-star-bold;20;768;320;64;64
+		phosphor-folder-simple-star-duotone;20;832;320;64;64
+		phosphor-folder-simple-star-fill;20;896;320;64;64
+		phosphor-folder-simple-star-light;20;960;320;64;64
+		phosphor-folder-simple-star-thin;20;0;384;64;64
+		phosphor-folder-simple-star;20;64;384;64;64
+		phosphor-folder-simple-thin;20;128;384;64;64
+		phosphor-folder-simple-user-bold;20;192;384;64;64
+		phosphor-folder-simple-user-duotone;20;256;384;64;64
+		phosphor-folder-simple-user-fill;20;320;384;64;64
+		phosphor-folder-simple-user-light;20;384;384;64;64
+		phosphor-folder-simple-user-thin;20;448;384;64;64
+		phosphor-folder-simple-user;20;512;384;64;64
+		phosphor-folder-simple;20;576;384;64;64
+		phosphor-folder-star-bold;20;640;384;64;64
+		phosphor-folder-star-duotone;20;704;384;64;64
+		phosphor-folder-star-fill;20;768;384;64;64
+		phosphor-folder-star-light;20;832;384;64;64
+		phosphor-folder-star-thin;20;896;384;64;64
+		phosphor-folder-star;20;960;384;64;64
+		phosphor-folder-thin;20;0;448;64;64
+		phosphor-folder-user-bold;20;64;448;64;64
+		phosphor-folder-user-duotone;20;128;448;64;64
+		phosphor-folder-user-fill;20;192;448;64;64
+		phosphor-folder-user-light;20;256;448;64;64
+		phosphor-folder-user-thin;20;320;448;64;64
+		phosphor-folder-user;20;384;448;64;64
+		phosphor-folder;20;448;448;64;64
+		phosphor-folders-bold;20;512;448;64;64
+		phosphor-folders-duotone;20;576;448;64;64
+		phosphor-folders-fill;20;640;448;64;64
+		phosphor-folders-light;20;704;448;64;64
+		phosphor-folders-thin;20;768;448;64;64
+		phosphor-folders;20;832;448;64;64
+		phosphor-football-bold;20;896;448;64;64
+		phosphor-football-duotone;20;960;448;64;64
+		phosphor-football-fill;20;0;512;64;64
+		phosphor-football-helmet-bold;20;64;512;64;64
+		phosphor-football-helmet-duotone;20;128;512;64;64
+		phosphor-football-helmet-fill;20;192;512;64;64
+		phosphor-football-helmet-light;20;256;512;64;64
+		phosphor-football-helmet-thin;20;320;512;64;64
+		phosphor-football-helmet;20;384;512;64;64
+		phosphor-football-light;20;448;512;64;64
+		phosphor-football-thin;20;512;512;64;64
+		phosphor-football;20;576;512;64;64
+		phosphor-footprints-bold;20;640;512;64;64
+		phosphor-footprints-duotone;20;704;512;64;64
+		phosphor-footprints-fill;20;768;512;64;64
+		phosphor-footprints-light;20;832;512;64;64
+		phosphor-footprints-thin;20;896;512;64;64
+		phosphor-footprints;20;960;512;64;64
+		phosphor-fork-knife-bold;20;0;576;64;64
+		phosphor-fork-knife-duotone;20;64;576;64;64
+		phosphor-fork-knife-fill;20;128;576;64;64
+		phosphor-fork-knife-light;20;192;576;64;64
+		phosphor-fork-knife-thin;20;256;576;64;64
+		phosphor-fork-knife;20;320;576;64;64
+		phosphor-four-k-bold;20;384;576;64;64
+		phosphor-four-k-duotone;20;448;576;64;64
+		phosphor-four-k-fill;20;512;576;64;64
+		phosphor-four-k-light;20;576;576;64;64
+		phosphor-four-k-thin;20;640;576;64;64
+		phosphor-four-k;20;704;576;64;64
+		phosphor-frame-corners-bold;20;768;576;64;64
+		phosphor-frame-corners-duotone;20;832;576;64;64
+		phosphor-frame-corners-fill;20;896;576;64;64
+		phosphor-frame-corners-light;20;960;576;64;64
+		phosphor-frame-corners-thin;20;0;640;64;64
+		phosphor-frame-corners;20;64;640;64;64
+		phosphor-framer-logo-bold;20;128;640;64;64
+		phosphor-framer-logo-duotone;20;192;640;64;64
+		phosphor-framer-logo-fill;20;256;640;64;64
+		phosphor-framer-logo-light;20;320;640;64;64
+		phosphor-framer-logo-thin;20;384;640;64;64
+		phosphor-framer-logo;20;448;640;64;64
+		phosphor-function-bold;20;512;640;64;64
+		phosphor-function-duotone;20;576;640;64;64
+		phosphor-function-fill;20;640;640;64;64
+		phosphor-function-light;20;704;640;64;64
+		phosphor-function-thin;20;768;640;64;64
+		phosphor-function;20;832;640;64;64
+		phosphor-funnel-bold;20;896;640;64;64
+		phosphor-funnel-duotone;20;960;640;64;64
+		phosphor-funnel-fill;20;0;704;64;64
+		phosphor-funnel-light;20;64;704;64;64
+		phosphor-funnel-simple-bold;20;128;704;64;64
+		phosphor-funnel-simple-duotone;20;192;704;64;64
+		phosphor-funnel-simple-fill;20;256;704;64;64
+		phosphor-funnel-simple-light;20;320;704;64;64
+		phosphor-funnel-simple-thin;20;384;704;64;64
+		phosphor-funnel-simple-x-bold;20;448;704;64;64
+		phosphor-funnel-simple-x-duotone;20;512;704;64;64
+		phosphor-funnel-simple-x-fill;20;576;704;64;64
+		phosphor-funnel-simple-x-light;20;640;704;64;64
+		phosphor-funnel-simple-x-thin;20;704;704;64;64
+		phosphor-funnel-simple-x;20;768;704;64;64
+		phosphor-funnel-simple;20;832;704;64;64
+		phosphor-funnel-thin;20;896;704;64;64
+		phosphor-funnel-x-bold;20;960;704;64;64
+		phosphor-funnel-x-duotone;20;0;768;64;64
+		phosphor-funnel-x-fill;20;64;768;64;64
+		phosphor-funnel-x-light;20;128;768;64;64
+		phosphor-funnel-x-thin;20;192;768;64;64
+		phosphor-funnel-x;20;256;768;64;64
+		phosphor-funnel;20;320;768;64;64
+		phosphor-game-controller-bold;20;384;768;64;64
+		phosphor-game-controller-duotone;20;448;768;64;64
+		phosphor-game-controller-fill;20;512;768;64;64
+		phosphor-game-controller-light;20;576;768;64;64
+		phosphor-game-controller-thin;20;640;768;64;64
+		phosphor-game-controller;20;704;768;64;64
+		phosphor-garage-bold;20;768;768;64;64
+		phosphor-garage-duotone;20;832;768;64;64
+		phosphor-garage-fill;20;896;768;64;64
+		phosphor-garage-light;20;960;768;64;64
+		phosphor-garage-thin;20;0;832;64;64
+		phosphor-garage;20;64;832;64;64
+		phosphor-gas-can-bold;20;128;832;64;64
+		phosphor-gas-can-duotone;20;192;832;64;64
+		phosphor-gas-can-fill;20;256;832;64;64
+		phosphor-gas-can-light;20;320;832;64;64
+		phosphor-gas-can-thin;20;384;832;64;64
+		phosphor-gas-can;20;448;832;64;64
+		phosphor-gas-pump-bold;20;512;832;64;64
+		phosphor-gas-pump-duotone;20;576;832;64;64
+		phosphor-gas-pump-fill;20;640;832;64;64
+		phosphor-gas-pump-light;20;704;832;64;64
+		phosphor-gas-pump-thin;20;768;832;64;64
+		phosphor-gas-pump;20;832;832;64;64
+		phosphor-gauge-bold;20;896;832;64;64
+		phosphor-gauge-duotone;20;960;832;64;64
+		phosphor-gauge-fill;20;0;896;64;64
+		phosphor-gauge-light;20;64;896;64;64
+		phosphor-gauge-thin;20;128;896;64;64
+		phosphor-gauge;20;192;896;64;64
+		phosphor-gavel-bold;20;256;896;64;64
+		phosphor-gavel-duotone;20;320;896;64;64
+		phosphor-gavel-fill;20;384;896;64;64
+		phosphor-gavel-light;20;448;896;64;64
+		phosphor-gavel-thin;20;512;896;64;64
+		phosphor-gavel;20;576;896;64;64
+		phosphor-gear-bold;20;640;896;64;64
+		phosphor-gear-duotone;20;704;896;64;64
+		phosphor-gear-fill;20;768;896;64;64
+		phosphor-gear-fine-bold;20;832;896;64;64
+		phosphor-gear-fine-duotone;20;896;896;64;64
+		phosphor-gear-fine-fill;20;960;896;64;64
+		phosphor-gear-fine-light;20;0;960;64;64
+		phosphor-gear-fine-thin;20;64;960;64;64
+		phosphor-gear-fine;20;128;960;64;64
+		phosphor-gear-light;20;192;960;64;64
+		phosphor-gear-six-bold;20;256;960;64;64
+		phosphor-gear-six-duotone;20;320;960;64;64
+		phosphor-gear-six-fill;20;384;960;64;64
+		phosphor-gear-six-light;20;448;960;64;64
+		phosphor-gear-six-thin;20;512;960;64;64
+		phosphor-gear-six;20;576;960;64;64
+		phosphor-gear-thin;20;640;960;64;64
+		phosphor-gear;20;704;960;64;64
+		phosphor-gender-female-bold;20;768;960;64;64
+		phosphor-gender-female-duotone;20;832;960;64;64
+		phosphor-gender-female-fill;20;896;960;64;64
+		phosphor-gender-female-light;20;960;960;64;64
+		phosphor-gender-female-thin;21;0;0;64;64
+		phosphor-gender-female;21;64;0;64;64
+		phosphor-gender-intersex-bold;21;128;0;64;64
+		phosphor-gender-intersex-duotone;21;192;0;64;64
+		phosphor-gender-intersex-fill;21;256;0;64;64
+		phosphor-gender-intersex-light;21;320;0;64;64
+		phosphor-gender-intersex-thin;21;384;0;64;64
+		phosphor-gender-intersex;21;448;0;64;64
+		phosphor-gender-male-bold;21;512;0;64;64
+		phosphor-gender-male-duotone;21;576;0;64;64
+		phosphor-gender-male-fill;21;640;0;64;64
+		phosphor-gender-male-light;21;704;0;64;64
+		phosphor-gender-male-thin;21;768;0;64;64
+		phosphor-gender-male;21;832;0;64;64
+		phosphor-gender-neuter-bold;21;896;0;64;64
+		phosphor-gender-neuter-duotone;21;960;0;64;64
+		phosphor-gender-neuter-fill;21;0;64;64;64
+		phosphor-gender-neuter-light;21;64;64;64;64
+		phosphor-gender-neuter-thin;21;128;64;64;64
+		phosphor-gender-neuter;21;192;64;64;64
+		phosphor-gender-nonbinary-bold;21;256;64;64;64
+		phosphor-gender-nonbinary-duotone;21;320;64;64;64
+		phosphor-gender-nonbinary-fill;21;384;64;64;64
+		phosphor-gender-nonbinary-light;21;448;64;64;64
+		phosphor-gender-nonbinary-thin;21;512;64;64;64
+		phosphor-gender-nonbinary;21;576;64;64;64
+		phosphor-gender-transgender-bold;21;640;64;64;64
+		phosphor-gender-transgender-duotone;21;704;64;64;64
+		phosphor-gender-transgender-fill;21;768;64;64;64
+		phosphor-gender-transgender-light;21;832;64;64;64
+		phosphor-gender-transgender-thin;21;896;64;64;64
+		phosphor-gender-transgender;21;960;64;64;64
+		phosphor-ghost-bold;21;0;128;64;64
+		phosphor-ghost-duotone;21;64;128;64;64
+		phosphor-ghost-fill;21;128;128;64;64
+		phosphor-ghost-light;21;192;128;64;64
+		phosphor-ghost-thin;21;256;128;64;64
+		phosphor-ghost;21;320;128;64;64
+		phosphor-gif-bold;21;384;128;64;64
+		phosphor-gif-duotone;21;448;128;64;64
+		phosphor-gif-fill;21;512;128;64;64
+		phosphor-gif-light;21;576;128;64;64
+		phosphor-gif-thin;21;640;128;64;64
+		phosphor-gif;21;704;128;64;64
+		phosphor-gift-bold;21;768;128;64;64
+		phosphor-gift-duotone;21;832;128;64;64
+		phosphor-gift-fill;21;896;128;64;64
+		phosphor-gift-light;21;960;128;64;64
+		phosphor-gift-thin;21;0;192;64;64
+		phosphor-gift;21;64;192;64;64
+		phosphor-git-branch-bold;21;128;192;64;64
+		phosphor-git-branch-duotone;21;192;192;64;64
+		phosphor-git-branch-fill;21;256;192;64;64
+		phosphor-git-branch-light;21;320;192;64;64
+		phosphor-git-branch-thin;21;384;192;64;64
+		phosphor-git-branch;21;448;192;64;64
+		phosphor-git-commit-bold;21;512;192;64;64
+		phosphor-git-commit-duotone;21;576;192;64;64
+		phosphor-git-commit-fill;21;640;192;64;64
+		phosphor-git-commit-light;21;704;192;64;64
+		phosphor-git-commit-thin;21;768;192;64;64
+		phosphor-git-commit;21;832;192;64;64
+		phosphor-git-diff-bold;21;896;192;64;64
+		phosphor-git-diff-duotone;21;960;192;64;64
+		phosphor-git-diff-fill;21;0;256;64;64
+		phosphor-git-diff-light;21;64;256;64;64
+		phosphor-git-diff-thin;21;128;256;64;64
+		phosphor-git-diff;21;192;256;64;64
+		phosphor-git-fork-bold;21;256;256;64;64
+		phosphor-git-fork-duotone;21;320;256;64;64
+		phosphor-git-fork-fill;21;384;256;64;64
+		phosphor-git-fork-light;21;448;256;64;64
+		phosphor-git-fork-thin;21;512;256;64;64
+		phosphor-git-fork;21;576;256;64;64
+		phosphor-git-merge-bold;21;640;256;64;64
+		phosphor-git-merge-duotone;21;704;256;64;64
+		phosphor-git-merge-fill;21;768;256;64;64
+		phosphor-git-merge-light;21;832;256;64;64
+		phosphor-git-merge-thin;21;896;256;64;64
+		phosphor-git-merge;21;960;256;64;64
+		phosphor-git-pull-request-bold;21;0;320;64;64
+		phosphor-git-pull-request-duotone;21;64;320;64;64
+		phosphor-git-pull-request-fill;21;128;320;64;64
+		phosphor-git-pull-request-light;21;192;320;64;64
+		phosphor-git-pull-request-thin;21;256;320;64;64
+		phosphor-git-pull-request;21;320;320;64;64
+		phosphor-github-logo-bold;21;384;320;64;64
+		phosphor-github-logo-duotone;21;448;320;64;64
+		phosphor-github-logo-fill;21;512;320;64;64
+		phosphor-github-logo-light;21;576;320;64;64
+		phosphor-github-logo-thin;21;640;320;64;64
+		phosphor-github-logo;21;704;320;64;64
+		phosphor-gitlab-logo-bold;21;768;320;64;64
+		phosphor-gitlab-logo-duotone;21;832;320;64;64
+		phosphor-gitlab-logo-fill;21;896;320;64;64
+		phosphor-gitlab-logo-light;21;960;320;64;64
+		phosphor-gitlab-logo-simple-bold;21;0;384;64;64
+		phosphor-gitlab-logo-simple-duotone;21;64;384;64;64
+		phosphor-gitlab-logo-simple-fill;21;128;384;64;64
+		phosphor-gitlab-logo-simple-light;21;192;384;64;64
+		phosphor-gitlab-logo-simple-thin;21;256;384;64;64
+		phosphor-gitlab-logo-simple;21;320;384;64;64
+		phosphor-gitlab-logo-thin;21;384;384;64;64
+		phosphor-gitlab-logo;21;448;384;64;64
+		phosphor-globe-bold;21;512;384;64;64
+		phosphor-globe-duotone;21;576;384;64;64
+		phosphor-globe-fill;21;640;384;64;64
+		phosphor-globe-hemisphere-east-bold;21;704;384;64;64
+		phosphor-globe-hemisphere-east-duotone;21;768;384;64;64
+		phosphor-globe-hemisphere-east-fill;21;832;384;64;64
+		phosphor-globe-hemisphere-east-light;21;896;384;64;64
+		phosphor-globe-hemisphere-east-thin;21;960;384;64;64
+		phosphor-globe-hemisphere-east;21;0;448;64;64
+		phosphor-globe-hemisphere-west-bold;21;64;448;64;64
+		phosphor-globe-hemisphere-west-duotone;21;128;448;64;64
+		phosphor-globe-hemisphere-west-fill;21;192;448;64;64
+		phosphor-globe-hemisphere-west-light;21;256;448;64;64
+		phosphor-globe-hemisphere-west-thin;21;320;448;64;64
+		phosphor-globe-hemisphere-west;21;384;448;64;64
+		phosphor-globe-light;21;448;448;64;64
+		phosphor-globe-simple-bold;21;512;448;64;64
+		phosphor-globe-simple-duotone;21;576;448;64;64
+		phosphor-globe-simple-fill;21;640;448;64;64
+		phosphor-globe-simple-light;21;704;448;64;64
+		phosphor-globe-simple-thin;21;768;448;64;64
+		phosphor-globe-simple-x-bold;21;832;448;64;64
+		phosphor-globe-simple-x-duotone;21;896;448;64;64
+		phosphor-globe-simple-x-fill;21;960;448;64;64
+		phosphor-globe-simple-x-light;21;0;512;64;64
+		phosphor-globe-simple-x-thin;21;64;512;64;64
+		phosphor-globe-simple-x;21;128;512;64;64
+		phosphor-globe-simple;21;192;512;64;64
+		phosphor-globe-stand-bold;21;256;512;64;64
+		phosphor-globe-stand-duotone;21;320;512;64;64
+		phosphor-globe-stand-fill;21;384;512;64;64
+		phosphor-globe-stand-light;21;448;512;64;64
+		phosphor-globe-stand-thin;21;512;512;64;64
+		phosphor-globe-stand;21;576;512;64;64
+		phosphor-globe-thin;21;640;512;64;64
+		phosphor-globe-x-bold;21;704;512;64;64
+		phosphor-globe-x-duotone;21;768;512;64;64
+		phosphor-globe-x-fill;21;832;512;64;64
+		phosphor-globe-x-light;21;896;512;64;64
+		phosphor-globe-x-thin;21;960;512;64;64
+		phosphor-globe-x;21;0;576;64;64
+		phosphor-globe;21;64;576;64;64
+		phosphor-goggles-bold;21;128;576;64;64
+		phosphor-goggles-duotone;21;192;576;64;64
+		phosphor-goggles-fill;21;256;576;64;64
+		phosphor-goggles-light;21;320;576;64;64
+		phosphor-goggles-thin;21;384;576;64;64
+		phosphor-goggles;21;448;576;64;64
+		phosphor-golf-bold;21;512;576;64;64
+		phosphor-golf-duotone;21;576;576;64;64
+		phosphor-golf-fill;21;640;576;64;64
+		phosphor-golf-light;21;704;576;64;64
+		phosphor-golf-thin;21;768;576;64;64
+		phosphor-golf;21;832;576;64;64
+		phosphor-goodreads-logo-bold;21;896;576;64;64
+		phosphor-goodreads-logo-duotone;21;960;576;64;64
+		phosphor-goodreads-logo-fill;21;0;640;64;64
+		phosphor-goodreads-logo-light;21;64;640;64;64
+		phosphor-goodreads-logo-thin;21;128;640;64;64
+		phosphor-goodreads-logo;21;192;640;64;64
+		phosphor-google-cardboard-logo-bold;21;256;640;64;64
+		phosphor-google-cardboard-logo-duotone;21;320;640;64;64
+		phosphor-google-cardboard-logo-fill;21;384;640;64;64
+		phosphor-google-cardboard-logo-light;21;448;640;64;64
+		phosphor-google-cardboard-logo-thin;21;512;640;64;64
+		phosphor-google-cardboard-logo;21;576;640;64;64
+		phosphor-google-chrome-logo-bold;21;640;640;64;64
+		phosphor-google-chrome-logo-duotone;21;704;640;64;64
+		phosphor-google-chrome-logo-fill;21;768;640;64;64
+		phosphor-google-chrome-logo-light;21;832;640;64;64
+		phosphor-google-chrome-logo-thin;21;896;640;64;64
+		phosphor-google-chrome-logo;21;960;640;64;64
+		phosphor-google-drive-logo-bold;21;0;704;64;64
+		phosphor-google-drive-logo-duotone;21;64;704;64;64
+		phosphor-google-drive-logo-fill;21;128;704;64;64
+		phosphor-google-drive-logo-light;21;192;704;64;64
+		phosphor-google-drive-logo-thin;21;256;704;64;64
+		phosphor-google-drive-logo;21;320;704;64;64
+		phosphor-google-logo-bold;21;384;704;64;64
+		phosphor-google-logo-duotone;21;448;704;64;64
+		phosphor-google-logo-fill;21;512;704;64;64
+		phosphor-google-logo-light;21;576;704;64;64
+		phosphor-google-logo-thin;21;640;704;64;64
+		phosphor-google-logo;21;704;704;64;64
+		phosphor-google-photos-logo-bold;21;768;704;64;64
+		phosphor-google-photos-logo-duotone;21;832;704;64;64
+		phosphor-google-photos-logo-fill;21;896;704;64;64
+		phosphor-google-photos-logo-light;21;960;704;64;64
+		phosphor-google-photos-logo-thin;21;0;768;64;64
+		phosphor-google-photos-logo;21;64;768;64;64
+		phosphor-google-play-logo-bold;21;128;768;64;64
+		phosphor-google-play-logo-duotone;21;192;768;64;64
+		phosphor-google-play-logo-fill;21;256;768;64;64
+		phosphor-google-play-logo-light;21;320;768;64;64
+		phosphor-google-play-logo-thin;21;384;768;64;64
+		phosphor-google-play-logo;21;448;768;64;64
+		phosphor-google-podcasts-logo-bold;21;512;768;64;64
+		phosphor-google-podcasts-logo-duotone;21;576;768;64;64
+		phosphor-google-podcasts-logo-fill;21;640;768;64;64
+		phosphor-google-podcasts-logo-light;21;704;768;64;64
+		phosphor-google-podcasts-logo-thin;21;768;768;64;64
+		phosphor-google-podcasts-logo;21;832;768;64;64
+		phosphor-gps-bold;21;896;768;64;64
+		phosphor-gps-duotone;21;960;768;64;64
+		phosphor-gps-fill;21;0;832;64;64
+		phosphor-gps-fix-bold;21;64;832;64;64
+		phosphor-gps-fix-duotone;21;128;832;64;64
+		phosphor-gps-fix-fill;21;192;832;64;64
+		phosphor-gps-fix-light;21;256;832;64;64
+		phosphor-gps-fix-thin;21;320;832;64;64
+		phosphor-gps-fix;21;384;832;64;64
+		phosphor-gps-light;21;448;832;64;64
+		phosphor-gps-slash-bold;21;512;832;64;64
+		phosphor-gps-slash-duotone;21;576;832;64;64
+		phosphor-gps-slash-fill;21;640;832;64;64
+		phosphor-gps-slash-light;21;704;832;64;64
+		phosphor-gps-slash-thin;21;768;832;64;64
+		phosphor-gps-slash;21;832;832;64;64
+		phosphor-gps-thin;21;896;832;64;64
+		phosphor-gps;21;960;832;64;64
+		phosphor-gradient-bold;21;0;896;64;64
+		phosphor-gradient-duotone;21;64;896;64;64
+		phosphor-gradient-fill;21;128;896;64;64
+		phosphor-gradient-light;21;192;896;64;64
+		phosphor-gradient-thin;21;256;896;64;64
+		phosphor-gradient;21;320;896;64;64
+		phosphor-graduation-cap-bold;21;384;896;64;64
+		phosphor-graduation-cap-duotone;21;448;896;64;64
+		phosphor-graduation-cap-fill;21;512;896;64;64
+		phosphor-graduation-cap-light;21;576;896;64;64
+		phosphor-graduation-cap-thin;21;640;896;64;64
+		phosphor-graduation-cap;21;704;896;64;64
+		phosphor-grains-bold;21;768;896;64;64
+		phosphor-grains-duotone;21;832;896;64;64
+		phosphor-grains-fill;21;896;896;64;64
+		phosphor-grains-light;21;960;896;64;64
+		phosphor-grains-slash-bold;21;0;960;64;64
+		phosphor-grains-slash-duotone;21;64;960;64;64
+		phosphor-grains-slash-fill;21;128;960;64;64
+		phosphor-grains-slash-light;21;192;960;64;64
+		phosphor-grains-slash-thin;21;256;960;64;64
+		phosphor-grains-slash;21;320;960;64;64
+		phosphor-grains-thin;21;384;960;64;64
+		phosphor-grains;21;448;960;64;64
+		phosphor-graph-bold;21;512;960;64;64
+		phosphor-graph-duotone;21;576;960;64;64
+		phosphor-graph-fill;21;640;960;64;64
+		phosphor-graph-light;21;704;960;64;64
+		phosphor-graph-thin;21;768;960;64;64
+		phosphor-graph;21;832;960;64;64
+		phosphor-graphics-card-bold;21;896;960;64;64
+		phosphor-graphics-card-duotone;21;960;960;64;64
+		phosphor-graphics-card-fill;22;0;0;64;64
+		phosphor-graphics-card-light;22;64;0;64;64
+		phosphor-graphics-card-thin;22;128;0;64;64
+		phosphor-graphics-card;22;192;0;64;64
+		phosphor-greater-than-bold;22;256;0;64;64
+		phosphor-greater-than-duotone;22;320;0;64;64
+		phosphor-greater-than-fill;22;384;0;64;64
+		phosphor-greater-than-light;22;448;0;64;64
+		phosphor-greater-than-or-equal-bold;22;512;0;64;64
+		phosphor-greater-than-or-equal-duotone;22;576;0;64;64
+		phosphor-greater-than-or-equal-fill;22;640;0;64;64
+		phosphor-greater-than-or-equal-light;22;704;0;64;64
+		phosphor-greater-than-or-equal-thin;22;768;0;64;64
+		phosphor-greater-than-or-equal;22;832;0;64;64
+		phosphor-greater-than-thin;22;896;0;64;64
+		phosphor-greater-than;22;960;0;64;64
+		phosphor-grid-four-bold;22;0;64;64;64
+		phosphor-grid-four-duotone;22;64;64;64;64
+		phosphor-grid-four-fill;22;128;64;64;64
+		phosphor-grid-four-light;22;192;64;64;64
+		phosphor-grid-four-thin;22;256;64;64;64
+		phosphor-grid-four;22;320;64;64;64
+		phosphor-grid-nine-bold;22;384;64;64;64
+		phosphor-grid-nine-duotone;22;448;64;64;64
+		phosphor-grid-nine-fill;22;512;64;64;64
+		phosphor-grid-nine-light;22;576;64;64;64
+		phosphor-grid-nine-thin;22;640;64;64;64
+		phosphor-grid-nine;22;704;64;64;64
+		phosphor-guitar-bold;22;768;64;64;64
+		phosphor-guitar-duotone;22;832;64;64;64
+		phosphor-guitar-fill;22;896;64;64;64
+		phosphor-guitar-light;22;960;64;64;64
+		phosphor-guitar-thin;22;0;128;64;64
+		phosphor-guitar;22;64;128;64;64
+		phosphor-hair-dryer-bold;22;128;128;64;64
+		phosphor-hair-dryer-duotone;22;192;128;64;64
+		phosphor-hair-dryer-fill;22;256;128;64;64
+		phosphor-hair-dryer-light;22;320;128;64;64
+		phosphor-hair-dryer-thin;22;384;128;64;64
+		phosphor-hair-dryer;22;448;128;64;64
+		phosphor-hamburger-bold;22;512;128;64;64
+		phosphor-hamburger-duotone;22;576;128;64;64
+		phosphor-hamburger-fill;22;640;128;64;64
+		phosphor-hamburger-light;22;704;128;64;64
+		phosphor-hamburger-thin;22;768;128;64;64
+		phosphor-hamburger;22;832;128;64;64
+		phosphor-hammer-bold;22;896;128;64;64
+		phosphor-hammer-duotone;22;960;128;64;64
+		phosphor-hammer-fill;22;0;192;64;64
+		phosphor-hammer-light;22;64;192;64;64
+		phosphor-hammer-thin;22;128;192;64;64
+		phosphor-hammer;22;192;192;64;64
+		phosphor-hand-arrow-down-bold;22;256;192;64;64
+		phosphor-hand-arrow-down-duotone;22;320;192;64;64
+		phosphor-hand-arrow-down-fill;22;384;192;64;64
+		phosphor-hand-arrow-down-light;22;448;192;64;64
+		phosphor-hand-arrow-down-thin;22;512;192;64;64
+		phosphor-hand-arrow-down;22;576;192;64;64
+		phosphor-hand-arrow-up-bold;22;640;192;64;64
+		phosphor-hand-arrow-up-duotone;22;704;192;64;64
+		phosphor-hand-arrow-up-fill;22;768;192;64;64
+		phosphor-hand-arrow-up-light;22;832;192;64;64
+		phosphor-hand-arrow-up-thin;22;896;192;64;64
+		phosphor-hand-arrow-up;22;960;192;64;64
+		phosphor-hand-bold;22;0;256;64;64
+		phosphor-hand-coins-bold;22;64;256;64;64
+		phosphor-hand-coins-duotone;22;128;256;64;64
+		phosphor-hand-coins-fill;22;192;256;64;64
+		phosphor-hand-coins-light;22;256;256;64;64
+		phosphor-hand-coins-thin;22;320;256;64;64
+		phosphor-hand-coins;22;384;256;64;64
+		phosphor-hand-deposit-bold;22;448;256;64;64
+		phosphor-hand-deposit-duotone;22;512;256;64;64
+		phosphor-hand-deposit-fill;22;576;256;64;64
+		phosphor-hand-deposit-light;22;640;256;64;64
+		phosphor-hand-deposit-thin;22;704;256;64;64
+		phosphor-hand-deposit;22;768;256;64;64
+		phosphor-hand-duotone;22;832;256;64;64
+		phosphor-hand-eye-bold;22;896;256;64;64
+		phosphor-hand-eye-duotone;22;960;256;64;64
+		phosphor-hand-eye-fill;22;0;320;64;64
+		phosphor-hand-eye-light;22;64;320;64;64
+		phosphor-hand-eye-thin;22;128;320;64;64
+		phosphor-hand-eye;22;192;320;64;64
+		phosphor-hand-fill;22;256;320;64;64
+		phosphor-hand-fist-bold;22;320;320;64;64
+		phosphor-hand-fist-duotone;22;384;320;64;64
+		phosphor-hand-fist-fill;22;448;320;64;64
+		phosphor-hand-fist-light;22;512;320;64;64
+		phosphor-hand-fist-thin;22;576;320;64;64
+		phosphor-hand-fist;22;640;320;64;64
+		phosphor-hand-grabbing-bold;22;704;320;64;64
+		phosphor-hand-grabbing-duotone;22;768;320;64;64
+		phosphor-hand-grabbing-fill;22;832;320;64;64
+		phosphor-hand-grabbing-light;22;896;320;64;64
+		phosphor-hand-grabbing-thin;22;960;320;64;64
+		phosphor-hand-grabbing;22;0;384;64;64
+		phosphor-hand-heart-bold;22;64;384;64;64
+		phosphor-hand-heart-duotone;22;128;384;64;64
+		phosphor-hand-heart-fill;22;192;384;64;64
+		phosphor-hand-heart-light;22;256;384;64;64
+		phosphor-hand-heart-thin;22;320;384;64;64
+		phosphor-hand-heart;22;384;384;64;64
+		phosphor-hand-light;22;448;384;64;64
+		phosphor-hand-palm-bold;22;512;384;64;64
+		phosphor-hand-palm-duotone;22;576;384;64;64
+		phosphor-hand-palm-fill;22;640;384;64;64
+		phosphor-hand-palm-light;22;704;384;64;64
+		phosphor-hand-palm-thin;22;768;384;64;64
+		phosphor-hand-palm;22;832;384;64;64
+		phosphor-hand-peace-bold;22;896;384;64;64
+		phosphor-hand-peace-duotone;22;960;384;64;64
+		phosphor-hand-peace-fill;22;0;448;64;64
+		phosphor-hand-peace-light;22;64;448;64;64
+		phosphor-hand-peace-thin;22;128;448;64;64
+		phosphor-hand-peace;22;192;448;64;64
+		phosphor-hand-pointing-bold;22;256;448;64;64
+		phosphor-hand-pointing-duotone;22;320;448;64;64
+		phosphor-hand-pointing-fill;22;384;448;64;64
+		phosphor-hand-pointing-light;22;448;448;64;64
+		phosphor-hand-pointing-thin;22;512;448;64;64
+		phosphor-hand-pointing;22;576;448;64;64
+		phosphor-hand-soap-bold;22;640;448;64;64
+		phosphor-hand-soap-duotone;22;704;448;64;64
+		phosphor-hand-soap-fill;22;768;448;64;64
+		phosphor-hand-soap-light;22;832;448;64;64
+		phosphor-hand-soap-thin;22;896;448;64;64
+		phosphor-hand-soap;22;960;448;64;64
+		phosphor-hand-swipe-left-bold;22;0;512;64;64
+		phosphor-hand-swipe-left-duotone;22;64;512;64;64
+		phosphor-hand-swipe-left-fill;22;128;512;64;64
+		phosphor-hand-swipe-left-light;22;192;512;64;64
+		phosphor-hand-swipe-left-thin;22;256;512;64;64
+		phosphor-hand-swipe-left;22;320;512;64;64
+		phosphor-hand-swipe-right-bold;22;384;512;64;64
+		phosphor-hand-swipe-right-duotone;22;448;512;64;64
+		phosphor-hand-swipe-right-fill;22;512;512;64;64
+		phosphor-hand-swipe-right-light;22;576;512;64;64
+		phosphor-hand-swipe-right-thin;22;640;512;64;64
+		phosphor-hand-swipe-right;22;704;512;64;64
+		phosphor-hand-tap-bold;22;768;512;64;64
+		phosphor-hand-tap-duotone;22;832;512;64;64
+		phosphor-hand-tap-fill;22;896;512;64;64
+		phosphor-hand-tap-light;22;960;512;64;64
+		phosphor-hand-tap-thin;22;0;576;64;64
+		phosphor-hand-tap;22;64;576;64;64
+		phosphor-hand-thin;22;128;576;64;64
+		phosphor-hand-waving-bold;22;192;576;64;64
+		phosphor-hand-waving-duotone;22;256;576;64;64
+		phosphor-hand-waving-fill;22;320;576;64;64
+		phosphor-hand-waving-light;22;384;576;64;64
+		phosphor-hand-waving-thin;22;448;576;64;64
+		phosphor-hand-waving;22;512;576;64;64
+		phosphor-hand-withdraw-bold;22;576;576;64;64
+		phosphor-hand-withdraw-duotone;22;640;576;64;64
+		phosphor-hand-withdraw-fill;22;704;576;64;64
+		phosphor-hand-withdraw-light;22;768;576;64;64
+		phosphor-hand-withdraw-thin;22;832;576;64;64
+		phosphor-hand-withdraw;22;896;576;64;64
+		phosphor-hand;22;960;576;64;64
+		phosphor-handbag-bold;22;0;640;64;64
+		phosphor-handbag-duotone;22;64;640;64;64
+		phosphor-handbag-fill;22;128;640;64;64
+		phosphor-handbag-light;22;192;640;64;64
+		phosphor-handbag-simple-bold;22;256;640;64;64
+		phosphor-handbag-simple-duotone;22;320;640;64;64
+		phosphor-handbag-simple-fill;22;384;640;64;64
+		phosphor-handbag-simple-light;22;448;640;64;64
+		phosphor-handbag-simple-thin;22;512;640;64;64
+		phosphor-handbag-simple;22;576;640;64;64
+		phosphor-handbag-thin;22;640;640;64;64
+		phosphor-handbag;22;704;640;64;64
+		phosphor-hands-clapping-bold;22;768;640;64;64
+		phosphor-hands-clapping-duotone;22;832;640;64;64
+		phosphor-hands-clapping-fill;22;896;640;64;64
+		phosphor-hands-clapping-light;22;960;640;64;64
+		phosphor-hands-clapping-thin;22;0;704;64;64
+		phosphor-hands-clapping;22;64;704;64;64
+		phosphor-hands-praying-bold;22;128;704;64;64
+		phosphor-hands-praying-duotone;22;192;704;64;64
+		phosphor-hands-praying-fill;22;256;704;64;64
+		phosphor-hands-praying-light;22;320;704;64;64
+		phosphor-hands-praying-thin;22;384;704;64;64
+		phosphor-hands-praying;22;448;704;64;64
+		phosphor-handshake-bold;22;512;704;64;64
+		phosphor-handshake-duotone;22;576;704;64;64
+		phosphor-handshake-fill;22;640;704;64;64
+		phosphor-handshake-light;22;704;704;64;64
+		phosphor-handshake-thin;22;768;704;64;64
+		phosphor-handshake;22;832;704;64;64
+		phosphor-hard-drive-bold;22;896;704;64;64
+		phosphor-hard-drive-duotone;22;960;704;64;64
+		phosphor-hard-drive-fill;22;0;768;64;64
+		phosphor-hard-drive-light;22;64;768;64;64
+		phosphor-hard-drive-thin;22;128;768;64;64
+		phosphor-hard-drive;22;192;768;64;64
+		phosphor-hard-drives-bold;22;256;768;64;64
+		phosphor-hard-drives-duotone;22;320;768;64;64
+		phosphor-hard-drives-fill;22;384;768;64;64
+		phosphor-hard-drives-light;22;448;768;64;64
+		phosphor-hard-drives-thin;22;512;768;64;64
+		phosphor-hard-drives;22;576;768;64;64
+		phosphor-hard-hat-bold;22;640;768;64;64
+		phosphor-hard-hat-duotone;22;704;768;64;64
+		phosphor-hard-hat-fill;22;768;768;64;64
+		phosphor-hard-hat-light;22;832;768;64;64
+		phosphor-hard-hat-thin;22;896;768;64;64
+		phosphor-hard-hat;22;960;768;64;64
+		phosphor-hash-bold;22;0;832;64;64
+		phosphor-hash-duotone;22;64;832;64;64
+		phosphor-hash-fill;22;128;832;64;64
+		phosphor-hash-light;22;192;832;64;64
+		phosphor-hash-straight-bold;22;256;832;64;64
+		phosphor-hash-straight-duotone;22;320;832;64;64
+		phosphor-hash-straight-fill;22;384;832;64;64
+		phosphor-hash-straight-light;22;448;832;64;64
+		phosphor-hash-straight-thin;22;512;832;64;64
+		phosphor-hash-straight;22;576;832;64;64
+		phosphor-hash-thin;22;640;832;64;64
+		phosphor-hash;22;704;832;64;64
+		phosphor-head-circuit-bold;22;768;832;64;64
+		phosphor-head-circuit-duotone;22;832;832;64;64
+		phosphor-head-circuit-fill;22;896;832;64;64
+		phosphor-head-circuit-light;22;960;832;64;64
+		phosphor-head-circuit-thin;22;0;896;64;64
+		phosphor-head-circuit;22;64;896;64;64
+		phosphor-headlights-bold;22;128;896;64;64
+		phosphor-headlights-duotone;22;192;896;64;64
+		phosphor-headlights-fill;22;256;896;64;64
+		phosphor-headlights-light;22;320;896;64;64
+		phosphor-headlights-thin;22;384;896;64;64
+		phosphor-headlights;22;448;896;64;64
+		phosphor-headphones-bold;22;512;896;64;64
+		phosphor-headphones-duotone;22;576;896;64;64
+		phosphor-headphones-fill;22;640;896;64;64
+		phosphor-headphones-light;22;704;896;64;64
+		phosphor-headphones-thin;22;768;896;64;64
+		phosphor-headphones;22;832;896;64;64
+		phosphor-headset-bold;22;896;896;64;64
+		phosphor-headset-duotone;22;960;896;64;64
+		phosphor-headset-fill;22;0;960;64;64
+		phosphor-headset-light;22;64;960;64;64
+		phosphor-headset-thin;22;128;960;64;64
+		phosphor-headset;22;192;960;64;64
+		phosphor-heart-bold;22;256;960;64;64
+		phosphor-heart-break-bold;22;320;960;64;64
+		phosphor-heart-break-duotone;22;384;960;64;64
+		phosphor-heart-break-fill;22;448;960;64;64
+		phosphor-heart-break-light;22;512;960;64;64
+		phosphor-heart-break-thin;22;576;960;64;64
+		phosphor-heart-break;22;640;960;64;64
+		phosphor-heart-duotone;22;704;960;64;64
+		phosphor-heart-fill;22;768;960;64;64
+		phosphor-heart-half-bold;22;832;960;64;64
+		phosphor-heart-half-duotone;22;896;960;64;64
+		phosphor-heart-half-fill;22;960;960;64;64
+		phosphor-heart-half-light;23;0;0;64;64
+		phosphor-heart-half-thin;23;64;0;64;64
+		phosphor-heart-half;23;128;0;64;64
+		phosphor-heart-light;23;192;0;64;64
+		phosphor-heart-straight-bold;23;256;0;64;64
+		phosphor-heart-straight-break-bold;23;320;0;64;64
+		phosphor-heart-straight-break-duotone;23;384;0;64;64
+		phosphor-heart-straight-break-fill;23;448;0;64;64
+		phosphor-heart-straight-break-light;23;512;0;64;64
+		phosphor-heart-straight-break-thin;23;576;0;64;64
+		phosphor-heart-straight-break;23;640;0;64;64
+		phosphor-heart-straight-duotone;23;704;0;64;64
+		phosphor-heart-straight-fill;23;768;0;64;64
+		phosphor-heart-straight-light;23;832;0;64;64
+		phosphor-heart-straight-thin;23;896;0;64;64
+		phosphor-heart-straight;23;960;0;64;64
+		phosphor-heart-thin;23;0;64;64;64
+		phosphor-heart;23;64;64;64;64
+		phosphor-heartbeat-bold;23;128;64;64;64
+		phosphor-heartbeat-duotone;23;192;64;64;64
+		phosphor-heartbeat-fill;23;256;64;64;64
+		phosphor-heartbeat-light;23;320;64;64;64
+		phosphor-heartbeat-thin;23;384;64;64;64
+		phosphor-heartbeat;23;448;64;64;64
+		phosphor-hexagon-bold;23;512;64;64;64
+		phosphor-hexagon-duotone;23;576;64;64;64
+		phosphor-hexagon-fill;23;640;64;64;64
+		phosphor-hexagon-light;23;704;64;64;64
+		phosphor-hexagon-thin;23;768;64;64;64
+		phosphor-hexagon;23;832;64;64;64
+		phosphor-high-definition-bold;23;896;64;64;64
+		phosphor-high-definition-duotone;23;960;64;64;64
+		phosphor-high-definition-fill;23;0;128;64;64
+		phosphor-high-definition-light;23;64;128;64;64
+		phosphor-high-definition-thin;23;128;128;64;64
+		phosphor-high-definition;23;192;128;64;64
+		phosphor-high-heel-bold;23;256;128;64;64
+		phosphor-high-heel-duotone;23;320;128;64;64
+		phosphor-high-heel-fill;23;384;128;64;64
+		phosphor-high-heel-light;23;448;128;64;64
+		phosphor-high-heel-thin;23;512;128;64;64
+		phosphor-high-heel;23;576;128;64;64
+		phosphor-highlighter-bold;23;640;128;64;64
+		phosphor-highlighter-circle-bold;23;704;128;64;64
+		phosphor-highlighter-circle-duotone;23;768;128;64;64
+		phosphor-highlighter-circle-fill;23;832;128;64;64
+		phosphor-highlighter-circle-light;23;896;128;64;64
+		phosphor-highlighter-circle-thin;23;960;128;64;64
+		phosphor-highlighter-circle;23;0;192;64;64
+		phosphor-highlighter-duotone;23;64;192;64;64
+		phosphor-highlighter-fill;23;128;192;64;64
+		phosphor-highlighter-light;23;192;192;64;64
+		phosphor-highlighter-thin;23;256;192;64;64
+		phosphor-highlighter;23;320;192;64;64
+		phosphor-hockey-bold;23;384;192;64;64
+		phosphor-hockey-duotone;23;448;192;64;64
+		phosphor-hockey-fill;23;512;192;64;64
+		phosphor-hockey-light;23;576;192;64;64
+		phosphor-hockey-thin;23;640;192;64;64
+		phosphor-hockey;23;704;192;64;64
+		phosphor-hoodie-bold;23;768;192;64;64
+		phosphor-hoodie-duotone;23;832;192;64;64
+		phosphor-hoodie-fill;23;896;192;64;64
+		phosphor-hoodie-light;23;960;192;64;64
+		phosphor-hoodie-thin;23;0;256;64;64
+		phosphor-hoodie;23;64;256;64;64
+		phosphor-horse-bold;23;128;256;64;64
+		phosphor-horse-duotone;23;192;256;64;64
+		phosphor-horse-fill;23;256;256;64;64
+		phosphor-horse-light;23;320;256;64;64
+		phosphor-horse-thin;23;384;256;64;64
+		phosphor-horse;23;448;256;64;64
+		phosphor-hospital-bold;23;512;256;64;64
+		phosphor-hospital-duotone;23;576;256;64;64
+		phosphor-hospital-fill;23;640;256;64;64
+		phosphor-hospital-light;23;704;256;64;64
+		phosphor-hospital-thin;23;768;256;64;64
+		phosphor-hospital;23;832;256;64;64
+		phosphor-hourglass-bold;23;896;256;64;64
+		phosphor-hourglass-duotone;23;960;256;64;64
+		phosphor-hourglass-fill;23;0;320;64;64
+		phosphor-hourglass-high-bold;23;64;320;64;64
+		phosphor-hourglass-high-duotone;23;128;320;64;64
+		phosphor-hourglass-high-fill;23;192;320;64;64
+		phosphor-hourglass-high-light;23;256;320;64;64
+		phosphor-hourglass-high-thin;23;320;320;64;64
+		phosphor-hourglass-high;23;384;320;64;64
+		phosphor-hourglass-light;23;448;320;64;64
+		phosphor-hourglass-low-bold;23;512;320;64;64
+		phosphor-hourglass-low-duotone;23;576;320;64;64
+		phosphor-hourglass-low-fill;23;640;320;64;64
+		phosphor-hourglass-low-light;23;704;320;64;64
+		phosphor-hourglass-low-thin;23;768;320;64;64
+		phosphor-hourglass-low;23;832;320;64;64
+		phosphor-hourglass-medium-bold;23;896;320;64;64
+		phosphor-hourglass-medium-duotone;23;960;320;64;64
+		phosphor-hourglass-medium-fill;23;0;384;64;64
+		phosphor-hourglass-medium-light;23;64;384;64;64
+		phosphor-hourglass-medium-thin;23;128;384;64;64
+		phosphor-hourglass-medium;23;192;384;64;64
+		phosphor-hourglass-simple-bold;23;256;384;64;64
+		phosphor-hourglass-simple-duotone;23;320;384;64;64
+		phosphor-hourglass-simple-fill;23;384;384;64;64
+		phosphor-hourglass-simple-high-bold;23;448;384;64;64
+		phosphor-hourglass-simple-high-duotone;23;512;384;64;64
+		phosphor-hourglass-simple-high-fill;23;576;384;64;64
+		phosphor-hourglass-simple-high-light;23;640;384;64;64
+		phosphor-hourglass-simple-high-thin;23;704;384;64;64
+		phosphor-hourglass-simple-high;23;768;384;64;64
+		phosphor-hourglass-simple-light;23;832;384;64;64
+		phosphor-hourglass-simple-low-bold;23;896;384;64;64
+		phosphor-hourglass-simple-low-duotone;23;960;384;64;64
+		phosphor-hourglass-simple-low-fill;23;0;448;64;64
+		phosphor-hourglass-simple-low-light;23;64;448;64;64
+		phosphor-hourglass-simple-low-thin;23;128;448;64;64
+		phosphor-hourglass-simple-low;23;192;448;64;64
+		phosphor-hourglass-simple-medium-bold;23;256;448;64;64
+		phosphor-hourglass-simple-medium-duotone;23;320;448;64;64
+		phosphor-hourglass-simple-medium-fill;23;384;448;64;64
+		phosphor-hourglass-simple-medium-light;23;448;448;64;64
+		phosphor-hourglass-simple-medium-thin;23;512;448;64;64
+		phosphor-hourglass-simple-medium;23;576;448;64;64
+		phosphor-hourglass-simple-thin;23;640;448;64;64
+		phosphor-hourglass-simple;23;704;448;64;64
+		phosphor-hourglass-thin;23;768;448;64;64
+		phosphor-hourglass;23;832;448;64;64
+		phosphor-house-bold;23;896;448;64;64
+		phosphor-house-duotone;23;960;448;64;64
+		phosphor-house-fill;23;0;512;64;64
+		phosphor-house-light;23;64;512;64;64
+		phosphor-house-line-bold;23;128;512;64;64
+		phosphor-house-line-duotone;23;192;512;64;64
+		phosphor-house-line-fill;23;256;512;64;64
+		phosphor-house-line-light;23;320;512;64;64
+		phosphor-house-line-thin;23;384;512;64;64
+		phosphor-house-line;23;448;512;64;64
+		phosphor-house-simple-bold;23;512;512;64;64
+		phosphor-house-simple-duotone;23;576;512;64;64
+		phosphor-house-simple-fill;23;640;512;64;64
+		phosphor-house-simple-light;23;704;512;64;64
+		phosphor-house-simple-thin;23;768;512;64;64
+		phosphor-house-simple;23;832;512;64;64
+		phosphor-house-thin;23;896;512;64;64
+		phosphor-house;23;960;512;64;64
+		phosphor-hurricane-bold;23;0;576;64;64
+		phosphor-hurricane-duotone;23;64;576;64;64
+		phosphor-hurricane-fill;23;128;576;64;64
+		phosphor-hurricane-light;23;192;576;64;64
+		phosphor-hurricane-thin;23;256;576;64;64
+		phosphor-hurricane;23;320;576;64;64
+		phosphor-ice-cream-bold;23;384;576;64;64
+		phosphor-ice-cream-duotone;23;448;576;64;64
+		phosphor-ice-cream-fill;23;512;576;64;64
+		phosphor-ice-cream-light;23;576;576;64;64
+		phosphor-ice-cream-thin;23;640;576;64;64
+		phosphor-ice-cream;23;704;576;64;64
+		phosphor-identification-badge-bold;23;768;576;64;64
+		phosphor-identification-badge-duotone;23;832;576;64;64
+		phosphor-identification-badge-fill;23;896;576;64;64
+		phosphor-identification-badge-light;23;960;576;64;64
+		phosphor-identification-badge-thin;23;0;640;64;64
+		phosphor-identification-badge;23;64;640;64;64
+		phosphor-identification-card-bold;23;128;640;64;64
+		phosphor-identification-card-duotone;23;192;640;64;64
+		phosphor-identification-card-fill;23;256;640;64;64
+		phosphor-identification-card-light;23;320;640;64;64
+		phosphor-identification-card-thin;23;384;640;64;64
+		phosphor-identification-card;23;448;640;64;64
+		phosphor-image-bold;23;512;640;64;64
+		phosphor-image-broken-bold;23;576;640;64;64
+		phosphor-image-broken-duotone;23;640;640;64;64
+		phosphor-image-broken-fill;23;704;640;64;64
+		phosphor-image-broken-light;23;768;640;64;64
+		phosphor-image-broken-thin;23;832;640;64;64
+		phosphor-image-broken;23;896;640;64;64
+		phosphor-image-duotone;23;960;640;64;64
+		phosphor-image-fill;23;0;704;64;64
+		phosphor-image-light;23;64;704;64;64
+		phosphor-image-square-bold;23;128;704;64;64
+		phosphor-image-square-duotone;23;192;704;64;64
+		phosphor-image-square-fill;23;256;704;64;64
+		phosphor-image-square-light;23;320;704;64;64
+		phosphor-image-square-thin;23;384;704;64;64
+		phosphor-image-square;23;448;704;64;64
+		phosphor-image-thin;23;512;704;64;64
+		phosphor-image;23;576;704;64;64
+		phosphor-images-bold;23;640;704;64;64
+		phosphor-images-duotone;23;704;704;64;64
+		phosphor-images-fill;23;768;704;64;64
+		phosphor-images-light;23;832;704;64;64
+		phosphor-images-square-bold;23;896;704;64;64
+		phosphor-images-square-duotone;23;960;704;64;64
+		phosphor-images-square-fill;23;0;768;64;64
+		phosphor-images-square-light;23;64;768;64;64
+		phosphor-images-square-thin;23;128;768;64;64
+		phosphor-images-square;23;192;768;64;64
+		phosphor-images-thin;23;256;768;64;64
+		phosphor-images;23;320;768;64;64
+		phosphor-infinity-bold;23;384;768;64;64
+		phosphor-infinity-duotone;23;448;768;64;64
+		phosphor-infinity-fill;23;512;768;64;64
+		phosphor-infinity-light;23;576;768;64;64
+		phosphor-infinity-thin;23;640;768;64;64
+		phosphor-infinity;23;704;768;64;64
+		phosphor-info-bold;23;768;768;64;64
+		phosphor-info-duotone;23;832;768;64;64
+		phosphor-info-fill;23;896;768;64;64
+		phosphor-info-light;23;960;768;64;64
+		phosphor-info-thin;23;0;832;64;64
+		phosphor-info;23;64;832;64;64
+		phosphor-instagram-logo-bold;23;128;832;64;64
+		phosphor-instagram-logo-duotone;23;192;832;64;64
+		phosphor-instagram-logo-fill;23;256;832;64;64
+		phosphor-instagram-logo-light;23;320;832;64;64
+		phosphor-instagram-logo-thin;23;384;832;64;64
+		phosphor-instagram-logo;23;448;832;64;64
+		phosphor-intersect-bold;23;512;832;64;64
+		phosphor-intersect-duotone;23;576;832;64;64
+		phosphor-intersect-fill;23;640;832;64;64
+		phosphor-intersect-light;23;704;832;64;64
+		phosphor-intersect-square-bold;23;768;832;64;64
+		phosphor-intersect-square-duotone;23;832;832;64;64
+		phosphor-intersect-square-fill;23;896;832;64;64
+		phosphor-intersect-square-light;23;960;832;64;64
+		phosphor-intersect-square-thin;23;0;896;64;64
+		phosphor-intersect-square;23;64;896;64;64
+		phosphor-intersect-thin;23;128;896;64;64
+		phosphor-intersect-three-bold;23;192;896;64;64
+		phosphor-intersect-three-duotone;23;256;896;64;64
+		phosphor-intersect-three-fill;23;320;896;64;64
+		phosphor-intersect-three-light;23;384;896;64;64
+		phosphor-intersect-three-thin;23;448;896;64;64
+		phosphor-intersect-three;23;512;896;64;64
+		phosphor-intersect;23;576;896;64;64
+		phosphor-intersection-bold;23;640;896;64;64
+		phosphor-intersection-duotone;23;704;896;64;64
+		phosphor-intersection-fill;23;768;896;64;64
+		phosphor-intersection-light;23;832;896;64;64
+		phosphor-intersection-thin;23;896;896;64;64
+		phosphor-intersection;23;960;896;64;64
+		phosphor-invoice-bold;23;0;960;64;64
+		phosphor-invoice-duotone;23;64;960;64;64
+		phosphor-invoice-fill;23;128;960;64;64
+		phosphor-invoice-light;23;192;960;64;64
+		phosphor-invoice-thin;23;256;960;64;64
+		phosphor-invoice;23;320;960;64;64
+		phosphor-island-bold;23;384;960;64;64
+		phosphor-island-duotone;23;448;960;64;64
+		phosphor-island-fill;23;512;960;64;64
+		phosphor-island-light;23;576;960;64;64
+		phosphor-island-thin;23;640;960;64;64
+		phosphor-island;23;704;960;64;64
+		phosphor-jar-bold;23;768;960;64;64
+		phosphor-jar-duotone;23;832;960;64;64
+		phosphor-jar-fill;23;896;960;64;64
+		phosphor-jar-label-bold;23;960;960;64;64
+		phosphor-jar-label-duotone;24;0;0;64;64
+		phosphor-jar-label-fill;24;64;0;64;64
+		phosphor-jar-label-light;24;128;0;64;64
+		phosphor-jar-label-thin;24;192;0;64;64
+		phosphor-jar-label;24;256;0;64;64
+		phosphor-jar-light;24;320;0;64;64
+		phosphor-jar-thin;24;384;0;64;64
+		phosphor-jar;24;448;0;64;64
+		phosphor-jeep-bold;24;512;0;64;64
+		phosphor-jeep-duotone;24;576;0;64;64
+		phosphor-jeep-fill;24;640;0;64;64
+		phosphor-jeep-light;24;704;0;64;64
+		phosphor-jeep-thin;24;768;0;64;64
+		phosphor-jeep;24;832;0;64;64
+		phosphor-joystick-bold;24;896;0;64;64
+		phosphor-joystick-duotone;24;960;0;64;64
+		phosphor-joystick-fill;24;0;64;64;64
+		phosphor-joystick-light;24;64;64;64;64
+		phosphor-joystick-thin;24;128;64;64;64
+		phosphor-joystick;24;192;64;64;64
+		phosphor-kanban-bold;24;256;64;64;64
+		phosphor-kanban-duotone;24;320;64;64;64
+		phosphor-kanban-fill;24;384;64;64;64
+		phosphor-kanban-light;24;448;64;64;64
+		phosphor-kanban-thin;24;512;64;64;64
+		phosphor-kanban;24;576;64;64;64
+		phosphor-key-bold;24;640;64;64;64
+		phosphor-key-duotone;24;704;64;64;64
+		phosphor-key-fill;24;768;64;64;64
+		phosphor-key-light;24;832;64;64;64
+		phosphor-key-return-bold;24;896;64;64;64
+		phosphor-key-return-duotone;24;960;64;64;64
+		phosphor-key-return-fill;24;0;128;64;64
+		phosphor-key-return-light;24;64;128;64;64
+		phosphor-key-return-thin;24;128;128;64;64
+		phosphor-key-return;24;192;128;64;64
+		phosphor-key-thin;24;256;128;64;64
+		phosphor-key;24;320;128;64;64
+		phosphor-keyboard-bold;24;384;128;64;64
+		phosphor-keyboard-duotone;24;448;128;64;64
+		phosphor-keyboard-fill;24;512;128;64;64
+		phosphor-keyboard-light;24;576;128;64;64
+		phosphor-keyboard-thin;24;640;128;64;64
+		phosphor-keyboard;24;704;128;64;64
+		phosphor-keyhole-bold;24;768;128;64;64
+		phosphor-keyhole-duotone;24;832;128;64;64
+		phosphor-keyhole-fill;24;896;128;64;64
+		phosphor-keyhole-light;24;960;128;64;64
+		phosphor-keyhole-thin;24;0;192;64;64
+		phosphor-keyhole;24;64;192;64;64
+		phosphor-knife-bold;24;128;192;64;64
+		phosphor-knife-duotone;24;192;192;64;64
+		phosphor-knife-fill;24;256;192;64;64
+		phosphor-knife-light;24;320;192;64;64
+		phosphor-knife-thin;24;384;192;64;64
+		phosphor-knife;24;448;192;64;64
+		phosphor-ladder-bold;24;512;192;64;64
+		phosphor-ladder-duotone;24;576;192;64;64
+		phosphor-ladder-fill;24;640;192;64;64
+		phosphor-ladder-light;24;704;192;64;64
+		phosphor-ladder-simple-bold;24;768;192;64;64
+		phosphor-ladder-simple-duotone;24;832;192;64;64
+		phosphor-ladder-simple-fill;24;896;192;64;64
+		phosphor-ladder-simple-light;24;960;192;64;64
+		phosphor-ladder-simple-thin;24;0;256;64;64
+		phosphor-ladder-simple;24;64;256;64;64
+		phosphor-ladder-thin;24;128;256;64;64
+		phosphor-ladder;24;192;256;64;64
+		phosphor-lamp-bold;24;256;256;64;64
+		phosphor-lamp-duotone;24;320;256;64;64
+		phosphor-lamp-fill;24;384;256;64;64
+		phosphor-lamp-light;24;448;256;64;64
+		phosphor-lamp-pendant-bold;24;512;256;64;64
+		phosphor-lamp-pendant-duotone;24;576;256;64;64
+		phosphor-lamp-pendant-fill;24;640;256;64;64
+		phosphor-lamp-pendant-light;24;704;256;64;64
+		phosphor-lamp-pendant-thin;24;768;256;64;64
+		phosphor-lamp-pendant;24;832;256;64;64
+		phosphor-lamp-thin;24;896;256;64;64
+		phosphor-lamp;24;960;256;64;64
+		phosphor-laptop-bold;24;0;320;64;64
+		phosphor-laptop-duotone;24;64;320;64;64
+		phosphor-laptop-fill;24;128;320;64;64
+		phosphor-laptop-light;24;192;320;64;64
+		phosphor-laptop-thin;24;256;320;64;64
+		phosphor-laptop;24;320;320;64;64
+		phosphor-lasso-bold;24;384;320;64;64
+		phosphor-lasso-duotone;24;448;320;64;64
+		phosphor-lasso-fill;24;512;320;64;64
+		phosphor-lasso-light;24;576;320;64;64
+		phosphor-lasso-thin;24;640;320;64;64
+		phosphor-lasso;24;704;320;64;64
+		phosphor-lastfm-logo-bold;24;768;320;64;64
+		phosphor-lastfm-logo-duotone;24;832;320;64;64
+		phosphor-lastfm-logo-fill;24;896;320;64;64
+		phosphor-lastfm-logo-light;24;960;320;64;64
+		phosphor-lastfm-logo-thin;24;0;384;64;64
+		phosphor-lastfm-logo;24;64;384;64;64
+		phosphor-layout-bold;24;128;384;64;64
+		phosphor-layout-duotone;24;192;384;64;64
+		phosphor-layout-fill;24;256;384;64;64
+		phosphor-layout-light;24;320;384;64;64
+		phosphor-layout-thin;24;384;384;64;64
+		phosphor-layout;24;448;384;64;64
+		phosphor-leaf-bold;24;512;384;64;64
+		phosphor-leaf-duotone;24;576;384;64;64
+		phosphor-leaf-fill;24;640;384;64;64
+		phosphor-leaf-light;24;704;384;64;64
+		phosphor-leaf-thin;24;768;384;64;64
+		phosphor-leaf;24;832;384;64;64
+		phosphor-lectern-bold;24;896;384;64;64
+		phosphor-lectern-duotone;24;960;384;64;64
+		phosphor-lectern-fill;24;0;448;64;64
+		phosphor-lectern-light;24;64;448;64;64
+		phosphor-lectern-thin;24;128;448;64;64
+		phosphor-lectern;24;192;448;64;64
+		phosphor-lego-bold;24;256;448;64;64
+		phosphor-lego-duotone;24;320;448;64;64
+		phosphor-lego-fill;24;384;448;64;64
+		phosphor-lego-light;24;448;448;64;64
+		phosphor-lego-smiley-bold;24;512;448;64;64
+		phosphor-lego-smiley-duotone;24;576;448;64;64
+		phosphor-lego-smiley-fill;24;640;448;64;64
+		phosphor-lego-smiley-light;24;704;448;64;64
+		phosphor-lego-smiley-thin;24;768;448;64;64
+		phosphor-lego-smiley;24;832;448;64;64
+		phosphor-lego-thin;24;896;448;64;64
+		phosphor-lego;24;960;448;64;64
+		phosphor-less-than-bold;24;0;512;64;64
+		phosphor-less-than-duotone;24;64;512;64;64
+		phosphor-less-than-fill;24;128;512;64;64
+		phosphor-less-than-light;24;192;512;64;64
+		phosphor-less-than-or-equal-bold;24;256;512;64;64
+		phosphor-less-than-or-equal-duotone;24;320;512;64;64
+		phosphor-less-than-or-equal-fill;24;384;512;64;64
+		phosphor-less-than-or-equal-light;24;448;512;64;64
+		phosphor-less-than-or-equal-thin;24;512;512;64;64
+		phosphor-less-than-or-equal;24;576;512;64;64
+		phosphor-less-than-thin;24;640;512;64;64
+		phosphor-less-than;24;704;512;64;64
+		phosphor-letter-circle-h-bold;24;768;512;64;64
+		phosphor-letter-circle-h-duotone;24;832;512;64;64
+		phosphor-letter-circle-h-fill;24;896;512;64;64
+		phosphor-letter-circle-h-light;24;960;512;64;64
+		phosphor-letter-circle-h-thin;24;0;576;64;64
+		phosphor-letter-circle-h;24;64;576;64;64
+		phosphor-letter-circle-p-bold;24;128;576;64;64
+		phosphor-letter-circle-p-duotone;24;192;576;64;64
+		phosphor-letter-circle-p-fill;24;256;576;64;64
+		phosphor-letter-circle-p-light;24;320;576;64;64
+		phosphor-letter-circle-p-thin;24;384;576;64;64
+		phosphor-letter-circle-p;24;448;576;64;64
+		phosphor-letter-circle-v-bold;24;512;576;64;64
+		phosphor-letter-circle-v-duotone;24;576;576;64;64
+		phosphor-letter-circle-v-fill;24;640;576;64;64
+		phosphor-letter-circle-v-light;24;704;576;64;64
+		phosphor-letter-circle-v-thin;24;768;576;64;64
+		phosphor-letter-circle-v;24;832;576;64;64
+		phosphor-lifebuoy-bold;24;896;576;64;64
+		phosphor-lifebuoy-duotone;24;960;576;64;64
+		phosphor-lifebuoy-fill;24;0;640;64;64
+		phosphor-lifebuoy-light;24;64;640;64;64
+		phosphor-lifebuoy-thin;24;128;640;64;64
+		phosphor-lifebuoy;24;192;640;64;64
+		phosphor-lightbulb-bold;24;256;640;64;64
+		phosphor-lightbulb-duotone;24;320;640;64;64
+		phosphor-lightbulb-filament-bold;24;384;640;64;64
+		phosphor-lightbulb-filament-duotone;24;448;640;64;64
+		phosphor-lightbulb-filament-fill;24;512;640;64;64
+		phosphor-lightbulb-filament-light;24;576;640;64;64
+		phosphor-lightbulb-filament-thin;24;640;640;64;64
+		phosphor-lightbulb-filament;24;704;640;64;64
+		phosphor-lightbulb-fill;24;768;640;64;64
+		phosphor-lightbulb-light;24;832;640;64;64
+		phosphor-lightbulb-thin;24;896;640;64;64
+		phosphor-lightbulb;24;960;640;64;64
+		phosphor-lighthouse-bold;24;0;704;64;64
+		phosphor-lighthouse-duotone;24;64;704;64;64
+		phosphor-lighthouse-fill;24;128;704;64;64
+		phosphor-lighthouse-light;24;192;704;64;64
+		phosphor-lighthouse-thin;24;256;704;64;64
+		phosphor-lighthouse;24;320;704;64;64
+		phosphor-lightning-a-bold;24;384;704;64;64
+		phosphor-lightning-a-duotone;24;448;704;64;64
+		phosphor-lightning-a-fill;24;512;704;64;64
+		phosphor-lightning-a-light;24;576;704;64;64
+		phosphor-lightning-a-thin;24;640;704;64;64
+		phosphor-lightning-a;24;704;704;64;64
+		phosphor-lightning-bold;24;768;704;64;64
+		phosphor-lightning-duotone;24;832;704;64;64
+		phosphor-lightning-fill;24;896;704;64;64
+		phosphor-lightning-light;24;960;704;64;64
+		phosphor-lightning-slash-bold;24;0;768;64;64
+		phosphor-lightning-slash-duotone;24;64;768;64;64
+		phosphor-lightning-slash-fill;24;128;768;64;64
+		phosphor-lightning-slash-light;24;192;768;64;64
+		phosphor-lightning-slash-thin;24;256;768;64;64
+		phosphor-lightning-slash;24;320;768;64;64
+		phosphor-lightning-thin;24;384;768;64;64
+		phosphor-lightning;24;448;768;64;64
+		phosphor-line-segment-bold;24;512;768;64;64
+		phosphor-line-segment-duotone;24;576;768;64;64
+		phosphor-line-segment-fill;24;640;768;64;64
+		phosphor-line-segment-light;24;704;768;64;64
+		phosphor-line-segment-thin;24;768;768;64;64
+		phosphor-line-segment;24;832;768;64;64
+		phosphor-line-segments-bold;24;896;768;64;64
+		phosphor-line-segments-duotone;24;960;768;64;64
+		phosphor-line-segments-fill;24;0;832;64;64
+		phosphor-line-segments-light;24;64;832;64;64
+		phosphor-line-segments-thin;24;128;832;64;64
+		phosphor-line-segments;24;192;832;64;64
+		phosphor-line-vertical-bold;24;256;832;64;64
+		phosphor-line-vertical-duotone;24;320;832;64;64
+		phosphor-line-vertical-fill;24;384;832;64;64
+		phosphor-line-vertical-light;24;448;832;64;64
+		phosphor-line-vertical-thin;24;512;832;64;64
+		phosphor-line-vertical;24;576;832;64;64
+		phosphor-link-bold;24;640;832;64;64
+		phosphor-link-break-bold;24;704;832;64;64
+		phosphor-link-break-duotone;24;768;832;64;64
+		phosphor-link-break-fill;24;832;832;64;64
+		phosphor-link-break-light;24;896;832;64;64
+		phosphor-link-break-thin;24;960;832;64;64
+		phosphor-link-break;24;0;896;64;64
+		phosphor-link-duotone;24;64;896;64;64
+		phosphor-link-fill;24;128;896;64;64
+		phosphor-link-light;24;192;896;64;64
+		phosphor-link-simple-bold;24;256;896;64;64
+		phosphor-link-simple-break-bold;24;320;896;64;64
+		phosphor-link-simple-break-duotone;24;384;896;64;64
+		phosphor-link-simple-break-fill;24;448;896;64;64
+		phosphor-link-simple-break-light;24;512;896;64;64
+		phosphor-link-simple-break-thin;24;576;896;64;64
+		phosphor-link-simple-break;24;640;896;64;64
+		phosphor-link-simple-duotone;24;704;896;64;64
+		phosphor-link-simple-fill;24;768;896;64;64
+		phosphor-link-simple-horizontal-bold;24;832;896;64;64
+		phosphor-link-simple-horizontal-break-bold;24;896;896;64;64
+		phosphor-link-simple-horizontal-break-duotone;24;960;896;64;64
+		phosphor-link-simple-horizontal-break-fill;24;0;960;64;64
+		phosphor-link-simple-horizontal-break-light;24;64;960;64;64
+		phosphor-link-simple-horizontal-break-thin;24;128;960;64;64
+		phosphor-link-simple-horizontal-break;24;192;960;64;64
+		phosphor-link-simple-horizontal-duotone;24;256;960;64;64
+		phosphor-link-simple-horizontal-fill;24;320;960;64;64
+		phosphor-link-simple-horizontal-light;24;384;960;64;64
+		phosphor-link-simple-horizontal-thin;24;448;960;64;64
+		phosphor-link-simple-horizontal;24;512;960;64;64
+		phosphor-link-simple-light;24;576;960;64;64
+		phosphor-link-simple-thin;24;640;960;64;64
+		phosphor-link-simple;24;704;960;64;64
+		phosphor-link-thin;24;768;960;64;64
+		phosphor-link;24;832;960;64;64
+		phosphor-linkedin-logo-bold;24;896;960;64;64
+		phosphor-linkedin-logo-duotone;24;960;960;64;64
+		phosphor-linkedin-logo-fill;25;0;0;64;64
+		phosphor-linkedin-logo-light;25;64;0;64;64
+		phosphor-linkedin-logo-thin;25;128;0;64;64
+		phosphor-linkedin-logo;25;192;0;64;64
+		phosphor-linktree-logo-bold;25;256;0;64;64
+		phosphor-linktree-logo-duotone;25;320;0;64;64
+		phosphor-linktree-logo-fill;25;384;0;64;64
+		phosphor-linktree-logo-light;25;448;0;64;64
+		phosphor-linktree-logo-thin;25;512;0;64;64
+		phosphor-linktree-logo;25;576;0;64;64
+		phosphor-linux-logo-bold;25;640;0;64;64
+		phosphor-linux-logo-duotone;25;704;0;64;64
+		phosphor-linux-logo-fill;25;768;0;64;64
+		phosphor-linux-logo-light;25;832;0;64;64
+		phosphor-linux-logo-thin;25;896;0;64;64
+		phosphor-linux-logo;25;960;0;64;64
+		phosphor-list-bold;25;0;64;64;64
+		phosphor-list-bullets-bold;25;64;64;64;64
+		phosphor-list-bullets-duotone;25;128;64;64;64
+		phosphor-list-bullets-fill;25;192;64;64;64
+		phosphor-list-bullets-light;25;256;64;64;64
+		phosphor-list-bullets-thin;25;320;64;64;64
+		phosphor-list-bullets;25;384;64;64;64
+		phosphor-list-checks-bold;25;448;64;64;64
+		phosphor-list-checks-duotone;25;512;64;64;64
+		phosphor-list-checks-fill;25;576;64;64;64
+		phosphor-list-checks-light;25;640;64;64;64
+		phosphor-list-checks-thin;25;704;64;64;64
+		phosphor-list-checks;25;768;64;64;64
+		phosphor-list-dashes-bold;25;832;64;64;64
+		phosphor-list-dashes-duotone;25;896;64;64;64
+		phosphor-list-dashes-fill;25;960;64;64;64
+		phosphor-list-dashes-light;25;0;128;64;64
+		phosphor-list-dashes-thin;25;64;128;64;64
+		phosphor-list-dashes;25;128;128;64;64
+		phosphor-list-duotone;25;192;128;64;64
+		phosphor-list-fill;25;256;128;64;64
+		phosphor-list-heart-bold;25;320;128;64;64
+		phosphor-list-heart-duotone;25;384;128;64;64
+		phosphor-list-heart-fill;25;448;128;64;64
+		phosphor-list-heart-light;25;512;128;64;64
+		phosphor-list-heart-thin;25;576;128;64;64
+		phosphor-list-heart;25;640;128;64;64
+		phosphor-list-light;25;704;128;64;64
+		phosphor-list-magnifying-glass-bold;25;768;128;64;64
+		phosphor-list-magnifying-glass-duotone;25;832;128;64;64
+		phosphor-list-magnifying-glass-fill;25;896;128;64;64
+		phosphor-list-magnifying-glass-light;25;960;128;64;64
+		phosphor-list-magnifying-glass-thin;25;0;192;64;64
+		phosphor-list-magnifying-glass;25;64;192;64;64
+		phosphor-list-numbers-bold;25;128;192;64;64
+		phosphor-list-numbers-duotone;25;192;192;64;64
+		phosphor-list-numbers-fill;25;256;192;64;64
+		phosphor-list-numbers-light;25;320;192;64;64
+		phosphor-list-numbers-thin;25;384;192;64;64
+		phosphor-list-numbers;25;448;192;64;64
+		phosphor-list-plus-bold;25;512;192;64;64
+		phosphor-list-plus-duotone;25;576;192;64;64
+		phosphor-list-plus-fill;25;640;192;64;64
+		phosphor-list-plus-light;25;704;192;64;64
+		phosphor-list-plus-thin;25;768;192;64;64
+		phosphor-list-plus;25;832;192;64;64
+		phosphor-list-star-bold;25;896;192;64;64
+		phosphor-list-star-duotone;25;960;192;64;64
+		phosphor-list-star-fill;25;0;256;64;64
+		phosphor-list-star-light;25;64;256;64;64
+		phosphor-list-star-thin;25;128;256;64;64
+		phosphor-list-star;25;192;256;64;64
+		phosphor-list-thin;25;256;256;64;64
+		phosphor-list;25;320;256;64;64
+		phosphor-lock-bold;25;384;256;64;64
+		phosphor-lock-duotone;25;448;256;64;64
+		phosphor-lock-fill;25;512;256;64;64
+		phosphor-lock-key-bold;25;576;256;64;64
+		phosphor-lock-key-duotone;25;640;256;64;64
+		phosphor-lock-key-fill;25;704;256;64;64
+		phosphor-lock-key-light;25;768;256;64;64
+		phosphor-lock-key-open-bold;25;832;256;64;64
+		phosphor-lock-key-open-duotone;25;896;256;64;64
+		phosphor-lock-key-open-fill;25;960;256;64;64
+		phosphor-lock-key-open-light;25;0;320;64;64
+		phosphor-lock-key-open-thin;25;64;320;64;64
+		phosphor-lock-key-open;25;128;320;64;64
+		phosphor-lock-key-thin;25;192;320;64;64
+		phosphor-lock-key;25;256;320;64;64
+		phosphor-lock-laminated-bold;25;320;320;64;64
+		phosphor-lock-laminated-duotone;25;384;320;64;64
+		phosphor-lock-laminated-fill;25;448;320;64;64
+		phosphor-lock-laminated-light;25;512;320;64;64
+		phosphor-lock-laminated-open-bold;25;576;320;64;64
+		phosphor-lock-laminated-open-duotone;25;640;320;64;64
+		phosphor-lock-laminated-open-fill;25;704;320;64;64
+		phosphor-lock-laminated-open-light;25;768;320;64;64
+		phosphor-lock-laminated-open-thin;25;832;320;64;64
+		phosphor-lock-laminated-open;25;896;320;64;64
+		phosphor-lock-laminated-thin;25;960;320;64;64
+		phosphor-lock-laminated;25;0;384;64;64
+		phosphor-lock-light;25;64;384;64;64
+		phosphor-lock-open-bold;25;128;384;64;64
+		phosphor-lock-open-duotone;25;192;384;64;64
+		phosphor-lock-open-fill;25;256;384;64;64
+		phosphor-lock-open-light;25;320;384;64;64
+		phosphor-lock-open-thin;25;384;384;64;64
+		phosphor-lock-open;25;448;384;64;64
+		phosphor-lock-simple-bold;25;512;384;64;64
+		phosphor-lock-simple-duotone;25;576;384;64;64
+		phosphor-lock-simple-fill;25;640;384;64;64
+		phosphor-lock-simple-light;25;704;384;64;64
+		phosphor-lock-simple-open-bold;25;768;384;64;64
+		phosphor-lock-simple-open-duotone;25;832;384;64;64
+		phosphor-lock-simple-open-fill;25;896;384;64;64
+		phosphor-lock-simple-open-light;25;960;384;64;64
+		phosphor-lock-simple-open-thin;25;0;448;64;64
+		phosphor-lock-simple-open;25;64;448;64;64
+		phosphor-lock-simple-thin;25;128;448;64;64
+		phosphor-lock-simple;25;192;448;64;64
+		phosphor-lock-thin;25;256;448;64;64
+		phosphor-lock;25;320;448;64;64
+		phosphor-lockers-bold;25;384;448;64;64
+		phosphor-lockers-duotone;25;448;448;64;64
+		phosphor-lockers-fill;25;512;448;64;64
+		phosphor-lockers-light;25;576;448;64;64
+		phosphor-lockers-thin;25;640;448;64;64
+		phosphor-lockers;25;704;448;64;64
+		phosphor-log-bold;25;768;448;64;64
+		phosphor-log-duotone;25;832;448;64;64
+		phosphor-log-fill;25;896;448;64;64
+		phosphor-log-light;25;960;448;64;64
+		phosphor-log-thin;25;0;512;64;64
+		phosphor-log;25;64;512;64;64
+		phosphor-magic-wand-bold;25;128;512;64;64
+		phosphor-magic-wand-duotone;25;192;512;64;64
+		phosphor-magic-wand-fill;25;256;512;64;64
+		phosphor-magic-wand-light;25;320;512;64;64
+		phosphor-magic-wand-thin;25;384;512;64;64
+		phosphor-magic-wand;25;448;512;64;64
+		phosphor-magnet-bold;25;512;512;64;64
+		phosphor-magnet-duotone;25;576;512;64;64
+		phosphor-magnet-fill;25;640;512;64;64
+		phosphor-magnet-light;25;704;512;64;64
+		phosphor-magnet-straight-bold;25;768;512;64;64
+		phosphor-magnet-straight-duotone;25;832;512;64;64
+		phosphor-magnet-straight-fill;25;896;512;64;64
+		phosphor-magnet-straight-light;25;960;512;64;64
+		phosphor-magnet-straight-thin;25;0;576;64;64
+		phosphor-magnet-straight;25;64;576;64;64
+		phosphor-magnet-thin;25;128;576;64;64
+		phosphor-magnet;25;192;576;64;64
+		phosphor-magnifying-glass-bold;25;256;576;64;64
+		phosphor-magnifying-glass-duotone;25;320;576;64;64
+		phosphor-magnifying-glass-fill;25;384;576;64;64
+		phosphor-magnifying-glass-light;25;448;576;64;64
+		phosphor-magnifying-glass-minus-bold;25;512;576;64;64
+		phosphor-magnifying-glass-minus-duotone;25;576;576;64;64
+		phosphor-magnifying-glass-minus-fill;25;640;576;64;64
+		phosphor-magnifying-glass-minus-light;25;704;576;64;64
+		phosphor-magnifying-glass-minus-thin;25;768;576;64;64
+		phosphor-magnifying-glass-minus;25;832;576;64;64
+		phosphor-magnifying-glass-plus-bold;25;896;576;64;64
+		phosphor-magnifying-glass-plus-duotone;25;960;576;64;64
+		phosphor-magnifying-glass-plus-fill;25;0;640;64;64
+		phosphor-magnifying-glass-plus-light;25;64;640;64;64
+		phosphor-magnifying-glass-plus-thin;25;128;640;64;64
+		phosphor-magnifying-glass-plus;25;192;640;64;64
+		phosphor-magnifying-glass-thin;25;256;640;64;64
+		phosphor-magnifying-glass;25;320;640;64;64
+		phosphor-mailbox-bold;25;384;640;64;64
+		phosphor-mailbox-duotone;25;448;640;64;64
+		phosphor-mailbox-fill;25;512;640;64;64
+		phosphor-mailbox-light;25;576;640;64;64
+		phosphor-mailbox-thin;25;640;640;64;64
+		phosphor-mailbox;25;704;640;64;64
+		phosphor-map-pin-area-bold;25;768;640;64;64
+		phosphor-map-pin-area-duotone;25;832;640;64;64
+		phosphor-map-pin-area-fill;25;896;640;64;64
+		phosphor-map-pin-area-light;25;960;640;64;64
+		phosphor-map-pin-area-thin;25;0;704;64;64
+		phosphor-map-pin-area;25;64;704;64;64
+		phosphor-map-pin-bold;25;128;704;64;64
+		phosphor-map-pin-duotone;25;192;704;64;64
+		phosphor-map-pin-fill;25;256;704;64;64
+		phosphor-map-pin-light;25;320;704;64;64
+		phosphor-map-pin-line-bold;25;384;704;64;64
+		phosphor-map-pin-line-duotone;25;448;704;64;64
+		phosphor-map-pin-line-fill;25;512;704;64;64
+		phosphor-map-pin-line-light;25;576;704;64;64
+		phosphor-map-pin-line-thin;25;640;704;64;64
+		phosphor-map-pin-line;25;704;704;64;64
+		phosphor-map-pin-plus-bold;25;768;704;64;64
+		phosphor-map-pin-plus-duotone;25;832;704;64;64
+		phosphor-map-pin-plus-fill;25;896;704;64;64
+		phosphor-map-pin-plus-light;25;960;704;64;64
+		phosphor-map-pin-plus-thin;25;0;768;64;64
+		phosphor-map-pin-plus;25;64;768;64;64
+		phosphor-map-pin-simple-area-bold;25;128;768;64;64
+		phosphor-map-pin-simple-area-duotone;25;192;768;64;64
+		phosphor-map-pin-simple-area-fill;25;256;768;64;64
+		phosphor-map-pin-simple-area-light;25;320;768;64;64
+		phosphor-map-pin-simple-area-thin;25;384;768;64;64
+		phosphor-map-pin-simple-area;25;448;768;64;64
+		phosphor-map-pin-simple-bold;25;512;768;64;64
+		phosphor-map-pin-simple-duotone;25;576;768;64;64
+		phosphor-map-pin-simple-fill;25;640;768;64;64
+		phosphor-map-pin-simple-light;25;704;768;64;64
+		phosphor-map-pin-simple-line-bold;25;768;768;64;64
+		phosphor-map-pin-simple-line-duotone;25;832;768;64;64
+		phosphor-map-pin-simple-line-fill;25;896;768;64;64
+		phosphor-map-pin-simple-line-light;25;960;768;64;64
+		phosphor-map-pin-simple-line-thin;25;0;832;64;64
+		phosphor-map-pin-simple-line;25;64;832;64;64
+		phosphor-map-pin-simple-thin;25;128;832;64;64
+		phosphor-map-pin-simple;25;192;832;64;64
+		phosphor-map-pin-thin;25;256;832;64;64
+		phosphor-map-pin;25;320;832;64;64
+		phosphor-map-trifold-bold;25;384;832;64;64
+		phosphor-map-trifold-duotone;25;448;832;64;64
+		phosphor-map-trifold-fill;25;512;832;64;64
+		phosphor-map-trifold-light;25;576;832;64;64
+		phosphor-map-trifold-thin;25;640;832;64;64
+		phosphor-map-trifold;25;704;832;64;64
+		phosphor-markdown-logo-bold;25;768;832;64;64
+		phosphor-markdown-logo-duotone;25;832;832;64;64
+		phosphor-markdown-logo-fill;25;896;832;64;64
+		phosphor-markdown-logo-light;25;960;832;64;64
+		phosphor-markdown-logo-thin;25;0;896;64;64
+		phosphor-markdown-logo;25;64;896;64;64
+		phosphor-marker-circle-bold;25;128;896;64;64
+		phosphor-marker-circle-duotone;25;192;896;64;64
+		phosphor-marker-circle-fill;25;256;896;64;64
+		phosphor-marker-circle-light;25;320;896;64;64
+		phosphor-marker-circle-thin;25;384;896;64;64
+		phosphor-marker-circle;25;448;896;64;64
+		phosphor-martini-bold;25;512;896;64;64
+		phosphor-martini-duotone;25;576;896;64;64
+		phosphor-martini-fill;25;640;896;64;64
+		phosphor-martini-light;25;704;896;64;64
+		phosphor-martini-thin;25;768;896;64;64
+		phosphor-martini;25;832;896;64;64
+		phosphor-mask-happy-bold;25;896;896;64;64
+		phosphor-mask-happy-duotone;25;960;896;64;64
+		phosphor-mask-happy-fill;25;0;960;64;64
+		phosphor-mask-happy-light;25;64;960;64;64
+		phosphor-mask-happy-thin;25;128;960;64;64
+		phosphor-mask-happy;25;192;960;64;64
+		phosphor-mask-sad-bold;25;256;960;64;64
+		phosphor-mask-sad-duotone;25;320;960;64;64
+		phosphor-mask-sad-fill;25;384;960;64;64
+		phosphor-mask-sad-light;25;448;960;64;64
+		phosphor-mask-sad-thin;25;512;960;64;64
+		phosphor-mask-sad;25;576;960;64;64
+		phosphor-mastodon-logo-bold;25;640;960;64;64
+		phosphor-mastodon-logo-duotone;25;704;960;64;64
+		phosphor-mastodon-logo-fill;25;768;960;64;64
+		phosphor-mastodon-logo-light;25;832;960;64;64
+		phosphor-mastodon-logo-thin;25;896;960;64;64
+		phosphor-mastodon-logo;25;960;960;64;64
+		phosphor-math-operations-bold;26;0;0;64;64
+		phosphor-math-operations-duotone;26;64;0;64;64
+		phosphor-math-operations-fill;26;128;0;64;64
+		phosphor-math-operations-light;26;192;0;64;64
+		phosphor-math-operations-thin;26;256;0;64;64
+		phosphor-math-operations;26;320;0;64;64
+		phosphor-matrix-logo-bold;26;384;0;64;64
+		phosphor-matrix-logo-duotone;26;448;0;64;64
+		phosphor-matrix-logo-fill;26;512;0;64;64
+		phosphor-matrix-logo-light;26;576;0;64;64
+		phosphor-matrix-logo-thin;26;640;0;64;64
+		phosphor-matrix-logo;26;704;0;64;64
+		phosphor-medal-bold;26;768;0;64;64
+		phosphor-medal-duotone;26;832;0;64;64
+		phosphor-medal-fill;26;896;0;64;64
+		phosphor-medal-light;26;960;0;64;64
+		phosphor-medal-military-bold;26;0;64;64;64
+		phosphor-medal-military-duotone;26;64;64;64;64
+		phosphor-medal-military-fill;26;128;64;64;64
+		phosphor-medal-military-light;26;192;64;64;64
+		phosphor-medal-military-thin;26;256;64;64;64
+		phosphor-medal-military;26;320;64;64;64
+		phosphor-medal-thin;26;384;64;64;64
+		phosphor-medal;26;448;64;64;64
+		phosphor-medium-logo-bold;26;512;64;64;64
+		phosphor-medium-logo-duotone;26;576;64;64;64
+		phosphor-medium-logo-fill;26;640;64;64;64
+		phosphor-medium-logo-light;26;704;64;64;64
+		phosphor-medium-logo-thin;26;768;64;64;64
+		phosphor-medium-logo;26;832;64;64;64
+		phosphor-megaphone-bold;26;896;64;64;64
+		phosphor-megaphone-duotone;26;960;64;64;64
+		phosphor-megaphone-fill;26;0;128;64;64
+		phosphor-megaphone-light;26;64;128;64;64
+		phosphor-megaphone-simple-bold;26;128;128;64;64
+		phosphor-megaphone-simple-duotone;26;192;128;64;64
+		phosphor-megaphone-simple-fill;26;256;128;64;64
+		phosphor-megaphone-simple-light;26;320;128;64;64
+		phosphor-megaphone-simple-thin;26;384;128;64;64
+		phosphor-megaphone-simple;26;448;128;64;64
+		phosphor-megaphone-thin;26;512;128;64;64
+		phosphor-megaphone;26;576;128;64;64
+		phosphor-member-of-bold;26;640;128;64;64
+		phosphor-member-of-duotone;26;704;128;64;64
+		phosphor-member-of-fill;26;768;128;64;64
+		phosphor-member-of-light;26;832;128;64;64
+		phosphor-member-of-thin;26;896;128;64;64
+		phosphor-member-of;26;960;128;64;64
+		phosphor-memory-bold;26;0;192;64;64
+		phosphor-memory-duotone;26;64;192;64;64
+		phosphor-memory-fill;26;128;192;64;64
+		phosphor-memory-light;26;192;192;64;64
+		phosphor-memory-thin;26;256;192;64;64
+		phosphor-memory;26;320;192;64;64
+		phosphor-messenger-logo-bold;26;384;192;64;64
+		phosphor-messenger-logo-duotone;26;448;192;64;64
+		phosphor-messenger-logo-fill;26;512;192;64;64
+		phosphor-messenger-logo-light;26;576;192;64;64
+		phosphor-messenger-logo-thin;26;640;192;64;64
+		phosphor-messenger-logo;26;704;192;64;64
+		phosphor-meta-logo-bold;26;768;192;64;64
+		phosphor-meta-logo-duotone;26;832;192;64;64
+		phosphor-meta-logo-fill;26;896;192;64;64
+		phosphor-meta-logo-light;26;960;192;64;64
+		phosphor-meta-logo-thin;26;0;256;64;64
+		phosphor-meta-logo;26;64;256;64;64
+		phosphor-meteor-bold;26;128;256;64;64
+		phosphor-meteor-duotone;26;192;256;64;64
+		phosphor-meteor-fill;26;256;256;64;64
+		phosphor-meteor-light;26;320;256;64;64
+		phosphor-meteor-thin;26;384;256;64;64
+		phosphor-meteor;26;448;256;64;64
+		phosphor-metronome-bold;26;512;256;64;64
+		phosphor-metronome-duotone;26;576;256;64;64
+		phosphor-metronome-fill;26;640;256;64;64
+		phosphor-metronome-light;26;704;256;64;64
+		phosphor-metronome-thin;26;768;256;64;64
+		phosphor-metronome;26;832;256;64;64
+		phosphor-microphone-bold;26;896;256;64;64
+		phosphor-microphone-duotone;26;960;256;64;64
+		phosphor-microphone-fill;26;0;320;64;64
+		phosphor-microphone-light;26;64;320;64;64
+		phosphor-microphone-slash-bold;26;128;320;64;64
+		phosphor-microphone-slash-duotone;26;192;320;64;64
+		phosphor-microphone-slash-fill;26;256;320;64;64
+		phosphor-microphone-slash-light;26;320;320;64;64
+		phosphor-microphone-slash-thin;26;384;320;64;64
+		phosphor-microphone-slash;26;448;320;64;64
+		phosphor-microphone-stage-bold;26;512;320;64;64
+		phosphor-microphone-stage-duotone;26;576;320;64;64
+		phosphor-microphone-stage-fill;26;640;320;64;64
+		phosphor-microphone-stage-light;26;704;320;64;64
+		phosphor-microphone-stage-thin;26;768;320;64;64
+		phosphor-microphone-stage;26;832;320;64;64
+		phosphor-microphone-thin;26;896;320;64;64
+		phosphor-microphone;26;960;320;64;64
+		phosphor-microscope-bold;26;0;384;64;64
+		phosphor-microscope-duotone;26;64;384;64;64
+		phosphor-microscope-fill;26;128;384;64;64
+		phosphor-microscope-light;26;192;384;64;64
+		phosphor-microscope-thin;26;256;384;64;64
+		phosphor-microscope;26;320;384;64;64
+		phosphor-microsoft-excel-logo-bold;26;384;384;64;64
+		phosphor-microsoft-excel-logo-duotone;26;448;384;64;64
+		phosphor-microsoft-excel-logo-fill;26;512;384;64;64
+		phosphor-microsoft-excel-logo-light;26;576;384;64;64
+		phosphor-microsoft-excel-logo-thin;26;640;384;64;64
+		phosphor-microsoft-excel-logo;26;704;384;64;64
+		phosphor-microsoft-outlook-logo-bold;26;768;384;64;64
+		phosphor-microsoft-outlook-logo-duotone;26;832;384;64;64
+		phosphor-microsoft-outlook-logo-fill;26;896;384;64;64
+		phosphor-microsoft-outlook-logo-light;26;960;384;64;64
+		phosphor-microsoft-outlook-logo-thin;26;0;448;64;64
+		phosphor-microsoft-outlook-logo;26;64;448;64;64
+		phosphor-microsoft-powerpoint-logo-bold;26;128;448;64;64
+		phosphor-microsoft-powerpoint-logo-duotone;26;192;448;64;64
+		phosphor-microsoft-powerpoint-logo-fill;26;256;448;64;64
+		phosphor-microsoft-powerpoint-logo-light;26;320;448;64;64
+		phosphor-microsoft-powerpoint-logo-thin;26;384;448;64;64
+		phosphor-microsoft-powerpoint-logo;26;448;448;64;64
+		phosphor-microsoft-teams-logo-bold;26;512;448;64;64
+		phosphor-microsoft-teams-logo-duotone;26;576;448;64;64
+		phosphor-microsoft-teams-logo-fill;26;640;448;64;64
+		phosphor-microsoft-teams-logo-light;26;704;448;64;64
+		phosphor-microsoft-teams-logo-thin;26;768;448;64;64
+		phosphor-microsoft-teams-logo;26;832;448;64;64
+		phosphor-microsoft-word-logo-bold;26;896;448;64;64
+		phosphor-microsoft-word-logo-duotone;26;960;448;64;64
+		phosphor-microsoft-word-logo-fill;26;0;512;64;64
+		phosphor-microsoft-word-logo-light;26;64;512;64;64
+		phosphor-microsoft-word-logo-thin;26;128;512;64;64
+		phosphor-microsoft-word-logo;26;192;512;64;64
+		phosphor-minus-bold;26;256;512;64;64
+		phosphor-minus-circle-bold;26;320;512;64;64
+		phosphor-minus-circle-duotone;26;384;512;64;64
+		phosphor-minus-circle-fill;26;448;512;64;64
+		phosphor-minus-circle-light;26;512;512;64;64
+		phosphor-minus-circle-thin;26;576;512;64;64
+		phosphor-minus-circle;26;640;512;64;64
+		phosphor-minus-duotone;26;704;512;64;64
+		phosphor-minus-fill;26;768;512;64;64
+		phosphor-minus-light;26;832;512;64;64
+		phosphor-minus-square-bold;26;896;512;64;64
+		phosphor-minus-square-duotone;26;960;512;64;64
+		phosphor-minus-square-fill;26;0;576;64;64
+		phosphor-minus-square-light;26;64;576;64;64
+		phosphor-minus-square-thin;26;128;576;64;64
+		phosphor-minus-square;26;192;576;64;64
+		phosphor-minus-thin;26;256;576;64;64
+		phosphor-minus;26;320;576;64;64
+		phosphor-money-bold;26;384;576;64;64
+		phosphor-money-duotone;26;448;576;64;64
+		phosphor-money-fill;26;512;576;64;64
+		phosphor-money-light;26;576;576;64;64
+		phosphor-money-thin;26;640;576;64;64
+		phosphor-money-wavy-bold;26;704;576;64;64
+		phosphor-money-wavy-duotone;26;768;576;64;64
+		phosphor-money-wavy-fill;26;832;576;64;64
+		phosphor-money-wavy-light;26;896;576;64;64
+		phosphor-money-wavy-thin;26;960;576;64;64
+		phosphor-money-wavy;26;0;640;64;64
+		phosphor-money;26;64;640;64;64
+		phosphor-monitor-arrow-up-bold;26;128;640;64;64
+		phosphor-monitor-arrow-up-duotone;26;192;640;64;64
+		phosphor-monitor-arrow-up-fill;26;256;640;64;64
+		phosphor-monitor-arrow-up-light;26;320;640;64;64
+		phosphor-monitor-arrow-up-thin;26;384;640;64;64
+		phosphor-monitor-arrow-up;26;448;640;64;64
+		phosphor-monitor-bold;26;512;640;64;64
+		phosphor-monitor-duotone;26;576;640;64;64
+		phosphor-monitor-fill;26;640;640;64;64
+		phosphor-monitor-light;26;704;640;64;64
+		phosphor-monitor-play-bold;26;768;640;64;64
+		phosphor-monitor-play-duotone;26;832;640;64;64
+		phosphor-monitor-play-fill;26;896;640;64;64
+		phosphor-monitor-play-light;26;960;640;64;64
+		phosphor-monitor-play-thin;26;0;704;64;64
+		phosphor-monitor-play;26;64;704;64;64
+		phosphor-monitor-thin;26;128;704;64;64
+		phosphor-monitor;26;192;704;64;64
+		phosphor-moon-bold;26;256;704;64;64
+		phosphor-moon-duotone;26;320;704;64;64
+		phosphor-moon-fill;26;384;704;64;64
+		phosphor-moon-light;26;448;704;64;64
+		phosphor-moon-stars-bold;26;512;704;64;64
+		phosphor-moon-stars-duotone;26;576;704;64;64
+		phosphor-moon-stars-fill;26;640;704;64;64
+		phosphor-moon-stars-light;26;704;704;64;64
+		phosphor-moon-stars-thin;26;768;704;64;64
+		phosphor-moon-stars;26;832;704;64;64
+		phosphor-moon-thin;26;896;704;64;64
+		phosphor-moon;26;960;704;64;64
+		phosphor-moped-bold;26;0;768;64;64
+		phosphor-moped-duotone;26;64;768;64;64
+		phosphor-moped-fill;26;128;768;64;64
+		phosphor-moped-front-bold;26;192;768;64;64
+		phosphor-moped-front-duotone;26;256;768;64;64
+		phosphor-moped-front-fill;26;320;768;64;64
+		phosphor-moped-front-light;26;384;768;64;64
+		phosphor-moped-front-thin;26;448;768;64;64
+		phosphor-moped-front;26;512;768;64;64
+		phosphor-moped-light;26;576;768;64;64
+		phosphor-moped-thin;26;640;768;64;64
+		phosphor-moped;26;704;768;64;64
+		phosphor-mosque-bold;26;768;768;64;64
+		phosphor-mosque-duotone;26;832;768;64;64
+		phosphor-mosque-fill;26;896;768;64;64
+		phosphor-mosque-light;26;960;768;64;64
+		phosphor-mosque-thin;26;0;832;64;64
+		phosphor-mosque;26;64;832;64;64
+		phosphor-motorcycle-bold;26;128;832;64;64
+		phosphor-motorcycle-duotone;26;192;832;64;64
+		phosphor-motorcycle-fill;26;256;832;64;64
+		phosphor-motorcycle-light;26;320;832;64;64
+		phosphor-motorcycle-thin;26;384;832;64;64
+		phosphor-motorcycle;26;448;832;64;64
+		phosphor-mountains-bold;26;512;832;64;64
+		phosphor-mountains-duotone;26;576;832;64;64
+		phosphor-mountains-fill;26;640;832;64;64
+		phosphor-mountains-light;26;704;832;64;64
+		phosphor-mountains-thin;26;768;832;64;64
+		phosphor-mountains;26;832;832;64;64
+		phosphor-mouse-bold;26;896;832;64;64
+		phosphor-mouse-duotone;26;960;832;64;64
+		phosphor-mouse-fill;26;0;896;64;64
+		phosphor-mouse-left-click-bold;26;64;896;64;64
+		phosphor-mouse-left-click-duotone;26;128;896;64;64
+		phosphor-mouse-left-click-fill;26;192;896;64;64
+		phosphor-mouse-left-click-light;26;256;896;64;64
+		phosphor-mouse-left-click-thin;26;320;896;64;64
+		phosphor-mouse-left-click;26;384;896;64;64
+		phosphor-mouse-light;26;448;896;64;64
+		phosphor-mouse-middle-click-bold;26;512;896;64;64
+		phosphor-mouse-middle-click-duotone;26;576;896;64;64
+		phosphor-mouse-middle-click-fill;26;640;896;64;64
+		phosphor-mouse-middle-click-light;26;704;896;64;64
+		phosphor-mouse-middle-click-thin;26;768;896;64;64
+		phosphor-mouse-middle-click;26;832;896;64;64
+		phosphor-mouse-right-click-bold;26;896;896;64;64
+		phosphor-mouse-right-click-duotone;26;960;896;64;64
+		phosphor-mouse-right-click-fill;26;0;960;64;64
+		phosphor-mouse-right-click-light;26;64;960;64;64
+		phosphor-mouse-right-click-thin;26;128;960;64;64
+		phosphor-mouse-right-click;26;192;960;64;64
+		phosphor-mouse-scroll-bold;26;256;960;64;64
+		phosphor-mouse-scroll-duotone;26;320;960;64;64
+		phosphor-mouse-scroll-fill;26;384;960;64;64
+		phosphor-mouse-scroll-light;26;448;960;64;64
+		phosphor-mouse-scroll-thin;26;512;960;64;64
+		phosphor-mouse-scroll;26;576;960;64;64
+		phosphor-mouse-simple-bold;26;640;960;64;64
+		phosphor-mouse-simple-duotone;26;704;960;64;64
+		phosphor-mouse-simple-fill;26;768;960;64;64
+		phosphor-mouse-simple-light;26;832;960;64;64
+		phosphor-mouse-simple-thin;26;896;960;64;64
+		phosphor-mouse-simple;26;960;960;64;64
+		phosphor-mouse-thin;27;0;0;64;64
+		phosphor-mouse;27;64;0;64;64
+		phosphor-music-note-bold;27;128;0;64;64
+		phosphor-music-note-duotone;27;192;0;64;64
+		phosphor-music-note-fill;27;256;0;64;64
+		phosphor-music-note-light;27;320;0;64;64
+		phosphor-music-note-simple-bold;27;384;0;64;64
+		phosphor-music-note-simple-duotone;27;448;0;64;64
+		phosphor-music-note-simple-fill;27;512;0;64;64
+		phosphor-music-note-simple-light;27;576;0;64;64
+		phosphor-music-note-simple-thin;27;640;0;64;64
+		phosphor-music-note-simple;27;704;0;64;64
+		phosphor-music-note-thin;27;768;0;64;64
+		phosphor-music-note;27;832;0;64;64
+		phosphor-music-notes-bold;27;896;0;64;64
+		phosphor-music-notes-duotone;27;960;0;64;64
+		phosphor-music-notes-fill;27;0;64;64;64
+		phosphor-music-notes-light;27;64;64;64;64
+		phosphor-music-notes-minus-bold;27;128;64;64;64
+		phosphor-music-notes-minus-duotone;27;192;64;64;64
+		phosphor-music-notes-minus-fill;27;256;64;64;64
+		phosphor-music-notes-minus-light;27;320;64;64;64
+		phosphor-music-notes-minus-thin;27;384;64;64;64
+		phosphor-music-notes-minus;27;448;64;64;64
+		phosphor-music-notes-plus-bold;27;512;64;64;64
+		phosphor-music-notes-plus-duotone;27;576;64;64;64
+		phosphor-music-notes-plus-fill;27;640;64;64;64
+		phosphor-music-notes-plus-light;27;704;64;64;64
+		phosphor-music-notes-plus-thin;27;768;64;64;64
+		phosphor-music-notes-plus;27;832;64;64;64
+		phosphor-music-notes-simple-bold;27;896;64;64;64
+		phosphor-music-notes-simple-duotone;27;960;64;64;64
+		phosphor-music-notes-simple-fill;27;0;128;64;64
+		phosphor-music-notes-simple-light;27;64;128;64;64
+		phosphor-music-notes-simple-thin;27;128;128;64;64
+		phosphor-music-notes-simple;27;192;128;64;64
+		phosphor-music-notes-thin;27;256;128;64;64
+		phosphor-music-notes;27;320;128;64;64
+		phosphor-navigation-arrow-bold;27;384;128;64;64
+		phosphor-navigation-arrow-duotone;27;448;128;64;64
+		phosphor-navigation-arrow-fill;27;512;128;64;64
+		phosphor-navigation-arrow-light;27;576;128;64;64
+		phosphor-navigation-arrow-thin;27;640;128;64;64
+		phosphor-navigation-arrow;27;704;128;64;64
+		phosphor-needle-bold;27;768;128;64;64
+		phosphor-needle-duotone;27;832;128;64;64
+		phosphor-needle-fill;27;896;128;64;64
+		phosphor-needle-light;27;960;128;64;64
+		phosphor-needle-thin;27;0;192;64;64
+		phosphor-needle;27;64;192;64;64
+		phosphor-network-bold;27;128;192;64;64
+		phosphor-network-duotone;27;192;192;64;64
+		phosphor-network-fill;27;256;192;64;64
+		phosphor-network-light;27;320;192;64;64
+		phosphor-network-slash-bold;27;384;192;64;64
+		phosphor-network-slash-duotone;27;448;192;64;64
+		phosphor-network-slash-fill;27;512;192;64;64
+		phosphor-network-slash-light;27;576;192;64;64
+		phosphor-network-slash-thin;27;640;192;64;64
+		phosphor-network-slash;27;704;192;64;64
+		phosphor-network-thin;27;768;192;64;64
+		phosphor-network-x-bold;27;832;192;64;64
+		phosphor-network-x-duotone;27;896;192;64;64
+		phosphor-network-x-fill;27;960;192;64;64
+		phosphor-network-x-light;27;0;256;64;64
+		phosphor-network-x-thin;27;64;256;64;64
+		phosphor-network-x;27;128;256;64;64
+		phosphor-network;27;192;256;64;64
+		phosphor-newspaper-bold;27;256;256;64;64
+		phosphor-newspaper-clipping-bold;27;320;256;64;64
+		phosphor-newspaper-clipping-duotone;27;384;256;64;64
+		phosphor-newspaper-clipping-fill;27;448;256;64;64
+		phosphor-newspaper-clipping-light;27;512;256;64;64
+		phosphor-newspaper-clipping-thin;27;576;256;64;64
+		phosphor-newspaper-clipping;27;640;256;64;64
+		phosphor-newspaper-duotone;27;704;256;64;64
+		phosphor-newspaper-fill;27;768;256;64;64
+		phosphor-newspaper-light;27;832;256;64;64
+		phosphor-newspaper-thin;27;896;256;64;64
+		phosphor-newspaper;27;960;256;64;64
+		phosphor-not-equals-bold;27;0;320;64;64
+		phosphor-not-equals-duotone;27;64;320;64;64
+		phosphor-not-equals-fill;27;128;320;64;64
+		phosphor-not-equals-light;27;192;320;64;64
+		phosphor-not-equals-thin;27;256;320;64;64
+		phosphor-not-equals;27;320;320;64;64
+		phosphor-not-member-of-bold;27;384;320;64;64
+		phosphor-not-member-of-duotone;27;448;320;64;64
+		phosphor-not-member-of-fill;27;512;320;64;64
+		phosphor-not-member-of-light;27;576;320;64;64
+		phosphor-not-member-of-thin;27;640;320;64;64
+		phosphor-not-member-of;27;704;320;64;64
+		phosphor-not-subset-of-bold;27;768;320;64;64
+		phosphor-not-subset-of-duotone;27;832;320;64;64
+		phosphor-not-subset-of-fill;27;896;320;64;64
+		phosphor-not-subset-of-light;27;960;320;64;64
+		phosphor-not-subset-of-thin;27;0;384;64;64
+		phosphor-not-subset-of;27;64;384;64;64
+		phosphor-not-superset-of-bold;27;128;384;64;64
+		phosphor-not-superset-of-duotone;27;192;384;64;64
+		phosphor-not-superset-of-fill;27;256;384;64;64
+		phosphor-not-superset-of-light;27;320;384;64;64
+		phosphor-not-superset-of-thin;27;384;384;64;64
+		phosphor-not-superset-of;27;448;384;64;64
+		phosphor-notches-bold;27;512;384;64;64
+		phosphor-notches-duotone;27;576;384;64;64
+		phosphor-notches-fill;27;640;384;64;64
+		phosphor-notches-light;27;704;384;64;64
+		phosphor-notches-thin;27;768;384;64;64
+		phosphor-notches;27;832;384;64;64
+		phosphor-note-blank-bold;27;896;384;64;64
+		phosphor-note-blank-duotone;27;960;384;64;64
+		phosphor-note-blank-fill;27;0;448;64;64
+		phosphor-note-blank-light;27;64;448;64;64
+		phosphor-note-blank-thin;27;128;448;64;64
+		phosphor-note-blank;27;192;448;64;64
+		phosphor-note-bold;27;256;448;64;64
+		phosphor-note-duotone;27;320;448;64;64
+		phosphor-note-fill;27;384;448;64;64
+		phosphor-note-light;27;448;448;64;64
+		phosphor-note-pencil-bold;27;512;448;64;64
+		phosphor-note-pencil-duotone;27;576;448;64;64
+		phosphor-note-pencil-fill;27;640;448;64;64
+		phosphor-note-pencil-light;27;704;448;64;64
+		phosphor-note-pencil-thin;27;768;448;64;64
+		phosphor-note-pencil;27;832;448;64;64
+		phosphor-note-thin;27;896;448;64;64
+		phosphor-note;27;960;448;64;64
+		phosphor-notebook-bold;27;0;512;64;64
+		phosphor-notebook-duotone;27;64;512;64;64
+		phosphor-notebook-fill;27;128;512;64;64
+		phosphor-notebook-light;27;192;512;64;64
+		phosphor-notebook-thin;27;256;512;64;64
+		phosphor-notebook;27;320;512;64;64
+		phosphor-notepad-bold;27;384;512;64;64
+		phosphor-notepad-duotone;27;448;512;64;64
+		phosphor-notepad-fill;27;512;512;64;64
+		phosphor-notepad-light;27;576;512;64;64
+		phosphor-notepad-thin;27;640;512;64;64
+		phosphor-notepad;27;704;512;64;64
+		phosphor-notification-bold;27;768;512;64;64
+		phosphor-notification-duotone;27;832;512;64;64
+		phosphor-notification-fill;27;896;512;64;64
+		phosphor-notification-light;27;960;512;64;64
+		phosphor-notification-thin;27;0;576;64;64
+		phosphor-notification;27;64;576;64;64
+		phosphor-notion-logo-bold;27;128;576;64;64
+		phosphor-notion-logo-duotone;27;192;576;64;64
+		phosphor-notion-logo-fill;27;256;576;64;64
+		phosphor-notion-logo-light;27;320;576;64;64
+		phosphor-notion-logo-thin;27;384;576;64;64
+		phosphor-notion-logo;27;448;576;64;64
+		phosphor-nuclear-plant-bold;27;512;576;64;64
+		phosphor-nuclear-plant-duotone;27;576;576;64;64
+		phosphor-nuclear-plant-fill;27;640;576;64;64
+		phosphor-nuclear-plant-light;27;704;576;64;64
+		phosphor-nuclear-plant-thin;27;768;576;64;64
+		phosphor-nuclear-plant;27;832;576;64;64
+		phosphor-number-circle-eight-bold;27;896;576;64;64
+		phosphor-number-circle-eight-duotone;27;960;576;64;64
+		phosphor-number-circle-eight-fill;27;0;640;64;64
+		phosphor-number-circle-eight-light;27;64;640;64;64
+		phosphor-number-circle-eight-thin;27;128;640;64;64
+		phosphor-number-circle-eight;27;192;640;64;64
+		phosphor-number-circle-five-bold;27;256;640;64;64
+		phosphor-number-circle-five-duotone;27;320;640;64;64
+		phosphor-number-circle-five-fill;27;384;640;64;64
+		phosphor-number-circle-five-light;27;448;640;64;64
+		phosphor-number-circle-five-thin;27;512;640;64;64
+		phosphor-number-circle-five;27;576;640;64;64
+		phosphor-number-circle-four-bold;27;640;640;64;64
+		phosphor-number-circle-four-duotone;27;704;640;64;64
+		phosphor-number-circle-four-fill;27;768;640;64;64
+		phosphor-number-circle-four-light;27;832;640;64;64
+		phosphor-number-circle-four-thin;27;896;640;64;64
+		phosphor-number-circle-four;27;960;640;64;64
+		phosphor-number-circle-nine-bold;27;0;704;64;64
+		phosphor-number-circle-nine-duotone;27;64;704;64;64
+		phosphor-number-circle-nine-fill;27;128;704;64;64
+		phosphor-number-circle-nine-light;27;192;704;64;64
+		phosphor-number-circle-nine-thin;27;256;704;64;64
+		phosphor-number-circle-nine;27;320;704;64;64
+		phosphor-number-circle-one-bold;27;384;704;64;64
+		phosphor-number-circle-one-duotone;27;448;704;64;64
+		phosphor-number-circle-one-fill;27;512;704;64;64
+		phosphor-number-circle-one-light;27;576;704;64;64
+		phosphor-number-circle-one-thin;27;640;704;64;64
+		phosphor-number-circle-one;27;704;704;64;64
+		phosphor-number-circle-seven-bold;27;768;704;64;64
+		phosphor-number-circle-seven-duotone;27;832;704;64;64
+		phosphor-number-circle-seven-fill;27;896;704;64;64
+		phosphor-number-circle-seven-light;27;960;704;64;64
+		phosphor-number-circle-seven-thin;27;0;768;64;64
+		phosphor-number-circle-seven;27;64;768;64;64
+		phosphor-number-circle-six-bold;27;128;768;64;64
+		phosphor-number-circle-six-duotone;27;192;768;64;64
+		phosphor-number-circle-six-fill;27;256;768;64;64
+		phosphor-number-circle-six-light;27;320;768;64;64
+		phosphor-number-circle-six-thin;27;384;768;64;64
+		phosphor-number-circle-six;27;448;768;64;64
+		phosphor-number-circle-three-bold;27;512;768;64;64
+		phosphor-number-circle-three-duotone;27;576;768;64;64
+		phosphor-number-circle-three-fill;27;640;768;64;64
+		phosphor-number-circle-three-light;27;704;768;64;64
+		phosphor-number-circle-three-thin;27;768;768;64;64
+		phosphor-number-circle-three;27;832;768;64;64
+		phosphor-number-circle-two-bold;27;896;768;64;64
+		phosphor-number-circle-two-duotone;27;960;768;64;64
+		phosphor-number-circle-two-fill;27;0;832;64;64
+		phosphor-number-circle-two-light;27;64;832;64;64
+		phosphor-number-circle-two-thin;27;128;832;64;64
+		phosphor-number-circle-two;27;192;832;64;64
+		phosphor-number-circle-zero-bold;27;256;832;64;64
+		phosphor-number-circle-zero-duotone;27;320;832;64;64
+		phosphor-number-circle-zero-fill;27;384;832;64;64
+		phosphor-number-circle-zero-light;27;448;832;64;64
+		phosphor-number-circle-zero-thin;27;512;832;64;64
+		phosphor-number-circle-zero;27;576;832;64;64
+		phosphor-number-eight-bold;27;640;832;64;64
+		phosphor-number-eight-duotone;27;704;832;64;64
+		phosphor-number-eight-fill;27;768;832;64;64
+		phosphor-number-eight-light;27;832;832;64;64
+		phosphor-number-eight-thin;27;896;832;64;64
+		phosphor-number-eight;27;960;832;64;64
+		phosphor-number-five-bold;27;0;896;64;64
+		phosphor-number-five-duotone;27;64;896;64;64
+		phosphor-number-five-fill;27;128;896;64;64
+		phosphor-number-five-light;27;192;896;64;64
+		phosphor-number-five-thin;27;256;896;64;64
+		phosphor-number-five;27;320;896;64;64
+		phosphor-number-four-bold;27;384;896;64;64
+		phosphor-number-four-duotone;27;448;896;64;64
+		phosphor-number-four-fill;27;512;896;64;64
+		phosphor-number-four-light;27;576;896;64;64
+		phosphor-number-four-thin;27;640;896;64;64
+		phosphor-number-four;27;704;896;64;64
+		phosphor-number-nine-bold;27;768;896;64;64
+		phosphor-number-nine-duotone;27;832;896;64;64
+		phosphor-number-nine-fill;27;896;896;64;64
+		phosphor-number-nine-light;27;960;896;64;64
+		phosphor-number-nine-thin;27;0;960;64;64
+		phosphor-number-nine;27;64;960;64;64
+		phosphor-number-one-bold;27;128;960;64;64
+		phosphor-number-one-duotone;27;192;960;64;64
+		phosphor-number-one-fill;27;256;960;64;64
+		phosphor-number-one-light;27;320;960;64;64
+		phosphor-number-one-thin;27;384;960;64;64
+		phosphor-number-one;27;448;960;64;64
+		phosphor-number-seven-bold;27;512;960;64;64
+		phosphor-number-seven-duotone;27;576;960;64;64
+		phosphor-number-seven-fill;27;640;960;64;64
+		phosphor-number-seven-light;27;704;960;64;64
+		phosphor-number-seven-thin;27;768;960;64;64
+		phosphor-number-seven;27;832;960;64;64
+		phosphor-number-six-bold;27;896;960;64;64
+		phosphor-number-six-duotone;27;960;960;64;64
+		phosphor-number-six-fill;28;0;0;64;64
+		phosphor-number-six-light;28;64;0;64;64
+		phosphor-number-six-thin;28;128;0;64;64
+		phosphor-number-six;28;192;0;64;64
+		phosphor-number-square-eight-bold;28;256;0;64;64
+		phosphor-number-square-eight-duotone;28;320;0;64;64
+		phosphor-number-square-eight-fill;28;384;0;64;64
+		phosphor-number-square-eight-light;28;448;0;64;64
+		phosphor-number-square-eight-thin;28;512;0;64;64
+		phosphor-number-square-eight;28;576;0;64;64
+		phosphor-number-square-five-bold;28;640;0;64;64
+		phosphor-number-square-five-duotone;28;704;0;64;64
+		phosphor-number-square-five-fill;28;768;0;64;64
+		phosphor-number-square-five-light;28;832;0;64;64
+		phosphor-number-square-five-thin;28;896;0;64;64
+		phosphor-number-square-five;28;960;0;64;64
+		phosphor-number-square-four-bold;28;0;64;64;64
+		phosphor-number-square-four-duotone;28;64;64;64;64
+		phosphor-number-square-four-fill;28;128;64;64;64
+		phosphor-number-square-four-light;28;192;64;64;64
+		phosphor-number-square-four-thin;28;256;64;64;64
+		phosphor-number-square-four;28;320;64;64;64
+		phosphor-number-square-nine-bold;28;384;64;64;64
+		phosphor-number-square-nine-duotone;28;448;64;64;64
+		phosphor-number-square-nine-fill;28;512;64;64;64
+		phosphor-number-square-nine-light;28;576;64;64;64
+		phosphor-number-square-nine-thin;28;640;64;64;64
+		phosphor-number-square-nine;28;704;64;64;64
+		phosphor-number-square-one-bold;28;768;64;64;64
+		phosphor-number-square-one-duotone;28;832;64;64;64
+		phosphor-number-square-one-fill;28;896;64;64;64
+		phosphor-number-square-one-light;28;960;64;64;64
+		phosphor-number-square-one-thin;28;0;128;64;64
+		phosphor-number-square-one;28;64;128;64;64
+		phosphor-number-square-seven-bold;28;128;128;64;64
+		phosphor-number-square-seven-duotone;28;192;128;64;64
+		phosphor-number-square-seven-fill;28;256;128;64;64
+		phosphor-number-square-seven-light;28;320;128;64;64
+		phosphor-number-square-seven-thin;28;384;128;64;64
+		phosphor-number-square-seven;28;448;128;64;64
+		phosphor-number-square-six-bold;28;512;128;64;64
+		phosphor-number-square-six-duotone;28;576;128;64;64
+		phosphor-number-square-six-fill;28;640;128;64;64
+		phosphor-number-square-six-light;28;704;128;64;64
+		phosphor-number-square-six-thin;28;768;128;64;64
+		phosphor-number-square-six;28;832;128;64;64
+		phosphor-number-square-three-bold;28;896;128;64;64
+		phosphor-number-square-three-duotone;28;960;128;64;64
+		phosphor-number-square-three-fill;28;0;192;64;64
+		phosphor-number-square-three-light;28;64;192;64;64
+		phosphor-number-square-three-thin;28;128;192;64;64
+		phosphor-number-square-three;28;192;192;64;64
+		phosphor-number-square-two-bold;28;256;192;64;64
+		phosphor-number-square-two-duotone;28;320;192;64;64
+		phosphor-number-square-two-fill;28;384;192;64;64
+		phosphor-number-square-two-light;28;448;192;64;64
+		phosphor-number-square-two-thin;28;512;192;64;64
+		phosphor-number-square-two;28;576;192;64;64
+		phosphor-number-square-zero-bold;28;640;192;64;64
+		phosphor-number-square-zero-duotone;28;704;192;64;64
+		phosphor-number-square-zero-fill;28;768;192;64;64
+		phosphor-number-square-zero-light;28;832;192;64;64
+		phosphor-number-square-zero-thin;28;896;192;64;64
+		phosphor-number-square-zero;28;960;192;64;64
+		phosphor-number-three-bold;28;0;256;64;64
+		phosphor-number-three-duotone;28;64;256;64;64
+		phosphor-number-three-fill;28;128;256;64;64
+		phosphor-number-three-light;28;192;256;64;64
+		phosphor-number-three-thin;28;256;256;64;64
+		phosphor-number-three;28;320;256;64;64
+		phosphor-number-two-bold;28;384;256;64;64
+		phosphor-number-two-duotone;28;448;256;64;64
+		phosphor-number-two-fill;28;512;256;64;64
+		phosphor-number-two-light;28;576;256;64;64
+		phosphor-number-two-thin;28;640;256;64;64
+		phosphor-number-two;28;704;256;64;64
+		phosphor-number-zero-bold;28;768;256;64;64
+		phosphor-number-zero-duotone;28;832;256;64;64
+		phosphor-number-zero-fill;28;896;256;64;64
+		phosphor-number-zero-light;28;960;256;64;64
+		phosphor-number-zero-thin;28;0;320;64;64
+		phosphor-number-zero;28;64;320;64;64
+		phosphor-numpad-bold;28;128;320;64;64
+		phosphor-numpad-duotone;28;192;320;64;64
+		phosphor-numpad-fill;28;256;320;64;64
+		phosphor-numpad-light;28;320;320;64;64
+		phosphor-numpad-thin;28;384;320;64;64
+		phosphor-numpad;28;448;320;64;64
+		phosphor-nut-bold;28;512;320;64;64
+		phosphor-nut-duotone;28;576;320;64;64
+		phosphor-nut-fill;28;640;320;64;64
+		phosphor-nut-light;28;704;320;64;64
+		phosphor-nut-thin;28;768;320;64;64
+		phosphor-nut;28;832;320;64;64
+		phosphor-ny-times-logo-bold;28;896;320;64;64
+		phosphor-ny-times-logo-duotone;28;960;320;64;64
+		phosphor-ny-times-logo-fill;28;0;384;64;64
+		phosphor-ny-times-logo-light;28;64;384;64;64
+		phosphor-ny-times-logo-thin;28;128;384;64;64
+		phosphor-ny-times-logo;28;192;384;64;64
+		phosphor-octagon-bold;28;256;384;64;64
+		phosphor-octagon-duotone;28;320;384;64;64
+		phosphor-octagon-fill;28;384;384;64;64
+		phosphor-octagon-light;28;448;384;64;64
+		phosphor-octagon-thin;28;512;384;64;64
+		phosphor-octagon;28;576;384;64;64
+		phosphor-office-chair-bold;28;640;384;64;64
+		phosphor-office-chair-duotone;28;704;384;64;64
+		phosphor-office-chair-fill;28;768;384;64;64
+		phosphor-office-chair-light;28;832;384;64;64
+		phosphor-office-chair-thin;28;896;384;64;64
+		phosphor-office-chair;28;960;384;64;64
+		phosphor-onigiri-bold;28;0;448;64;64
+		phosphor-onigiri-duotone;28;64;448;64;64
+		phosphor-onigiri-fill;28;128;448;64;64
+		phosphor-onigiri-light;28;192;448;64;64
+		phosphor-onigiri-thin;28;256;448;64;64
+		phosphor-onigiri;28;320;448;64;64
+		phosphor-open-ai-logo-bold;28;384;448;64;64
+		phosphor-open-ai-logo-duotone;28;448;448;64;64
+		phosphor-open-ai-logo-fill;28;512;448;64;64
+		phosphor-open-ai-logo-light;28;576;448;64;64
+		phosphor-open-ai-logo-thin;28;640;448;64;64
+		phosphor-open-ai-logo;28;704;448;64;64
+		phosphor-option-bold;28;768;448;64;64
+		phosphor-option-duotone;28;832;448;64;64
+		phosphor-option-fill;28;896;448;64;64
+		phosphor-option-light;28;960;448;64;64
+		phosphor-option-thin;28;0;512;64;64
+		phosphor-option;28;64;512;64;64
+		phosphor-orange-bold;28;128;512;64;64
+		phosphor-orange-duotone;28;192;512;64;64
+		phosphor-orange-fill;28;256;512;64;64
+		phosphor-orange-light;28;320;512;64;64
+		phosphor-orange-slice-bold;28;384;512;64;64
+		phosphor-orange-slice-duotone;28;448;512;64;64
+		phosphor-orange-slice-fill;28;512;512;64;64
+		phosphor-orange-slice-light;28;576;512;64;64
+		phosphor-orange-slice-thin;28;640;512;64;64
+		phosphor-orange-slice;28;704;512;64;64
+		phosphor-orange-thin;28;768;512;64;64
+		phosphor-orange;28;832;512;64;64
+		phosphor-oven-bold;28;896;512;64;64
+		phosphor-oven-duotone;28;960;512;64;64
+		phosphor-oven-fill;28;0;576;64;64
+		phosphor-oven-light;28;64;576;64;64
+		phosphor-oven-thin;28;128;576;64;64
+		phosphor-oven;28;192;576;64;64
+		phosphor-package-bold;28;256;576;64;64
+		phosphor-package-duotone;28;320;576;64;64
+		phosphor-package-fill;28;384;576;64;64
+		phosphor-package-light;28;448;576;64;64
+		phosphor-package-thin;28;512;576;64;64
+		phosphor-package;28;576;576;64;64
+		phosphor-paint-brush-bold;28;640;576;64;64
+		phosphor-paint-brush-broad-bold;28;704;576;64;64
+		phosphor-paint-brush-broad-duotone;28;768;576;64;64
+		phosphor-paint-brush-broad-fill;28;832;576;64;64
+		phosphor-paint-brush-broad-light;28;896;576;64;64
+		phosphor-paint-brush-broad-thin;28;960;576;64;64
+		phosphor-paint-brush-broad;28;0;640;64;64
+		phosphor-paint-brush-duotone;28;64;640;64;64
+		phosphor-paint-brush-fill;28;128;640;64;64
+		phosphor-paint-brush-household-bold;28;192;640;64;64
+		phosphor-paint-brush-household-duotone;28;256;640;64;64
+		phosphor-paint-brush-household-fill;28;320;640;64;64
+		phosphor-paint-brush-household-light;28;384;640;64;64
+		phosphor-paint-brush-household-thin;28;448;640;64;64
+		phosphor-paint-brush-household;28;512;640;64;64
+		phosphor-paint-brush-light;28;576;640;64;64
+		phosphor-paint-brush-thin;28;640;640;64;64
+		phosphor-paint-brush;28;704;640;64;64
+		phosphor-paint-bucket-bold;28;768;640;64;64
+		phosphor-paint-bucket-duotone;28;832;640;64;64
+		phosphor-paint-bucket-fill;28;896;640;64;64
+		phosphor-paint-bucket-light;28;960;640;64;64
+		phosphor-paint-bucket-thin;28;0;704;64;64
+		phosphor-paint-bucket;28;64;704;64;64
+		phosphor-paint-roller-bold;28;128;704;64;64
+		phosphor-paint-roller-duotone;28;192;704;64;64
+		phosphor-paint-roller-fill;28;256;704;64;64
+		phosphor-paint-roller-light;28;320;704;64;64
+		phosphor-paint-roller-thin;28;384;704;64;64
+		phosphor-paint-roller;28;448;704;64;64
+		phosphor-palette-bold;28;512;704;64;64
+		phosphor-palette-duotone;28;576;704;64;64
+		phosphor-palette-fill;28;640;704;64;64
+		phosphor-palette-light;28;704;704;64;64
+		phosphor-palette-thin;28;768;704;64;64
+		phosphor-palette;28;832;704;64;64
+		phosphor-panorama-bold;28;896;704;64;64
+		phosphor-panorama-duotone;28;960;704;64;64
+		phosphor-panorama-fill;28;0;768;64;64
+		phosphor-panorama-light;28;64;768;64;64
+		phosphor-panorama-thin;28;128;768;64;64
+		phosphor-panorama;28;192;768;64;64
+		phosphor-pants-bold;28;256;768;64;64
+		phosphor-pants-duotone;28;320;768;64;64
+		phosphor-pants-fill;28;384;768;64;64
+		phosphor-pants-light;28;448;768;64;64
+		phosphor-pants-thin;28;512;768;64;64
+		phosphor-pants;28;576;768;64;64
+		phosphor-paper-plane-bold;28;640;768;64;64
+		phosphor-paper-plane-duotone;28;704;768;64;64
+		phosphor-paper-plane-fill;28;768;768;64;64
+		phosphor-paper-plane-light;28;832;768;64;64
+		phosphor-paper-plane-right-bold;28;896;768;64;64
+		phosphor-paper-plane-right-duotone;28;960;768;64;64
+		phosphor-paper-plane-right-fill;28;0;832;64;64
+		phosphor-paper-plane-right-light;28;64;832;64;64
+		phosphor-paper-plane-right-thin;28;128;832;64;64
+		phosphor-paper-plane-right;28;192;832;64;64
+		phosphor-paper-plane-thin;28;256;832;64;64
+		phosphor-paper-plane-tilt-bold;28;320;832;64;64
+		phosphor-paper-plane-tilt-duotone;28;384;832;64;64
+		phosphor-paper-plane-tilt-fill;28;448;832;64;64
+		phosphor-paper-plane-tilt-light;28;512;832;64;64
+		phosphor-paper-plane-tilt-thin;28;576;832;64;64
+		phosphor-paper-plane-tilt;28;640;832;64;64
+		phosphor-paper-plane;28;704;832;64;64
+		phosphor-paperclip-bold;28;768;832;64;64
+		phosphor-paperclip-duotone;28;832;832;64;64
+		phosphor-paperclip-fill;28;896;832;64;64
+		phosphor-paperclip-horizontal-bold;28;960;832;64;64
+		phosphor-paperclip-horizontal-duotone;28;0;896;64;64
+		phosphor-paperclip-horizontal-fill;28;64;896;64;64
+		phosphor-paperclip-horizontal-light;28;128;896;64;64
+		phosphor-paperclip-horizontal-thin;28;192;896;64;64
+		phosphor-paperclip-horizontal;28;256;896;64;64
+		phosphor-paperclip-light;28;320;896;64;64
+		phosphor-paperclip-thin;28;384;896;64;64
+		phosphor-paperclip;28;448;896;64;64
+		phosphor-parachute-bold;28;512;896;64;64
+		phosphor-parachute-duotone;28;576;896;64;64
+		phosphor-parachute-fill;28;640;896;64;64
+		phosphor-parachute-light;28;704;896;64;64
+		phosphor-parachute-thin;28;768;896;64;64
+		phosphor-parachute;28;832;896;64;64
+		phosphor-paragraph-bold;28;896;896;64;64
+		phosphor-paragraph-duotone;28;960;896;64;64
+		phosphor-paragraph-fill;28;0;960;64;64
+		phosphor-paragraph-light;28;64;960;64;64
+		phosphor-paragraph-thin;28;128;960;64;64
+		phosphor-paragraph;28;192;960;64;64
+		phosphor-parallelogram-bold;28;256;960;64;64
+		phosphor-parallelogram-duotone;28;320;960;64;64
+		phosphor-parallelogram-fill;28;384;960;64;64
+		phosphor-parallelogram-light;28;448;960;64;64
+		phosphor-parallelogram-thin;28;512;960;64;64
+		phosphor-parallelogram;28;576;960;64;64
+		phosphor-park-bold;28;640;960;64;64
+		phosphor-park-duotone;28;704;960;64;64
+		phosphor-park-fill;28;768;960;64;64
+		phosphor-park-light;28;832;960;64;64
+		phosphor-park-thin;28;896;960;64;64
+		phosphor-park;28;960;960;64;64
+		phosphor-password-bold;29;0;0;64;64
+		phosphor-password-duotone;29;64;0;64;64
+		phosphor-password-fill;29;128;0;64;64
+		phosphor-password-light;29;192;0;64;64
+		phosphor-password-thin;29;256;0;64;64
+		phosphor-password;29;320;0;64;64
+		phosphor-path-bold;29;384;0;64;64
+		phosphor-path-duotone;29;448;0;64;64
+		phosphor-path-fill;29;512;0;64;64
+		phosphor-path-light;29;576;0;64;64
+		phosphor-path-thin;29;640;0;64;64
+		phosphor-path;29;704;0;64;64
+		phosphor-patreon-logo-bold;29;768;0;64;64
+		phosphor-patreon-logo-duotone;29;832;0;64;64
+		phosphor-patreon-logo-fill;29;896;0;64;64
+		phosphor-patreon-logo-light;29;960;0;64;64
+		phosphor-patreon-logo-thin;29;0;64;64;64
+		phosphor-patreon-logo;29;64;64;64;64
+		phosphor-pause-bold;29;128;64;64;64
+		phosphor-pause-circle-bold;29;192;64;64;64
+		phosphor-pause-circle-duotone;29;256;64;64;64
+		phosphor-pause-circle-fill;29;320;64;64;64
+		phosphor-pause-circle-light;29;384;64;64;64
+		phosphor-pause-circle-thin;29;448;64;64;64
+		phosphor-pause-circle;29;512;64;64;64
+		phosphor-pause-duotone;29;576;64;64;64
+		phosphor-pause-fill;29;640;64;64;64
+		phosphor-pause-light;29;704;64;64;64
+		phosphor-pause-thin;29;768;64;64;64
+		phosphor-pause;29;832;64;64;64
+		phosphor-paw-print-bold;29;896;64;64;64
+		phosphor-paw-print-duotone;29;960;64;64;64
+		phosphor-paw-print-fill;29;0;128;64;64
+		phosphor-paw-print-light;29;64;128;64;64
+		phosphor-paw-print-thin;29;128;128;64;64
+		phosphor-paw-print;29;192;128;64;64
+		phosphor-paypal-logo-bold;29;256;128;64;64
+		phosphor-paypal-logo-duotone;29;320;128;64;64
+		phosphor-paypal-logo-fill;29;384;128;64;64
+		phosphor-paypal-logo-light;29;448;128;64;64
+		phosphor-paypal-logo-thin;29;512;128;64;64
+		phosphor-paypal-logo;29;576;128;64;64
+		phosphor-peace-bold;29;640;128;64;64
+		phosphor-peace-duotone;29;704;128;64;64
+		phosphor-peace-fill;29;768;128;64;64
+		phosphor-peace-light;29;832;128;64;64
+		phosphor-peace-thin;29;896;128;64;64
+		phosphor-peace;29;960;128;64;64
+		phosphor-pen-bold;29;0;192;64;64
+		phosphor-pen-duotone;29;64;192;64;64
+		phosphor-pen-fill;29;128;192;64;64
+		phosphor-pen-light;29;192;192;64;64
+		phosphor-pen-nib-bold;29;256;192;64;64
+		phosphor-pen-nib-duotone;29;320;192;64;64
+		phosphor-pen-nib-fill;29;384;192;64;64
+		phosphor-pen-nib-light;29;448;192;64;64
+		phosphor-pen-nib-straight-bold;29;512;192;64;64
+		phosphor-pen-nib-straight-duotone;29;576;192;64;64
+		phosphor-pen-nib-straight-fill;29;640;192;64;64
+		phosphor-pen-nib-straight-light;29;704;192;64;64
+		phosphor-pen-nib-straight-thin;29;768;192;64;64
+		phosphor-pen-nib-straight;29;832;192;64;64
+		phosphor-pen-nib-thin;29;896;192;64;64
+		phosphor-pen-nib;29;960;192;64;64
+		phosphor-pen-thin;29;0;256;64;64
+		phosphor-pen;29;64;256;64;64
+		phosphor-pencil-bold;29;128;256;64;64
+		phosphor-pencil-circle-bold;29;192;256;64;64
+		phosphor-pencil-circle-duotone;29;256;256;64;64
+		phosphor-pencil-circle-fill;29;320;256;64;64
+		phosphor-pencil-circle-light;29;384;256;64;64
+		phosphor-pencil-circle-thin;29;448;256;64;64
+		phosphor-pencil-circle;29;512;256;64;64
+		phosphor-pencil-duotone;29;576;256;64;64
+		phosphor-pencil-fill;29;640;256;64;64
+		phosphor-pencil-light;29;704;256;64;64
+		phosphor-pencil-line-bold;29;768;256;64;64
+		phosphor-pencil-line-duotone;29;832;256;64;64
+		phosphor-pencil-line-fill;29;896;256;64;64
+		phosphor-pencil-line-light;29;960;256;64;64
+		phosphor-pencil-line-thin;29;0;320;64;64
+		phosphor-pencil-line;29;64;320;64;64
+		phosphor-pencil-ruler-bold;29;128;320;64;64
+		phosphor-pencil-ruler-duotone;29;192;320;64;64
+		phosphor-pencil-ruler-fill;29;256;320;64;64
+		phosphor-pencil-ruler-light;29;320;320;64;64
+		phosphor-pencil-ruler-thin;29;384;320;64;64
+		phosphor-pencil-ruler;29;448;320;64;64
+		phosphor-pencil-simple-bold;29;512;320;64;64
+		phosphor-pencil-simple-duotone;29;576;320;64;64
+		phosphor-pencil-simple-fill;29;640;320;64;64
+		phosphor-pencil-simple-light;29;704;320;64;64
+		phosphor-pencil-simple-line-bold;29;768;320;64;64
+		phosphor-pencil-simple-line-duotone;29;832;320;64;64
+		phosphor-pencil-simple-line-fill;29;896;320;64;64
+		phosphor-pencil-simple-line-light;29;960;320;64;64
+		phosphor-pencil-simple-line-thin;29;0;384;64;64
+		phosphor-pencil-simple-line;29;64;384;64;64
+		phosphor-pencil-simple-slash-bold;29;128;384;64;64
+		phosphor-pencil-simple-slash-duotone;29;192;384;64;64
+		phosphor-pencil-simple-slash-fill;29;256;384;64;64
+		phosphor-pencil-simple-slash-light;29;320;384;64;64
+		phosphor-pencil-simple-slash-thin;29;384;384;64;64
+		phosphor-pencil-simple-slash;29;448;384;64;64
+		phosphor-pencil-simple-thin;29;512;384;64;64
+		phosphor-pencil-simple;29;576;384;64;64
+		phosphor-pencil-slash-bold;29;640;384;64;64
+		phosphor-pencil-slash-duotone;29;704;384;64;64
+		phosphor-pencil-slash-fill;29;768;384;64;64
+		phosphor-pencil-slash-light;29;832;384;64;64
+		phosphor-pencil-slash-thin;29;896;384;64;64
+		phosphor-pencil-slash;29;960;384;64;64
+		phosphor-pencil-thin;29;0;448;64;64
+		phosphor-pencil;29;64;448;64;64
+		phosphor-pentagon-bold;29;128;448;64;64
+		phosphor-pentagon-duotone;29;192;448;64;64
+		phosphor-pentagon-fill;29;256;448;64;64
+		phosphor-pentagon-light;29;320;448;64;64
+		phosphor-pentagon-thin;29;384;448;64;64
+		phosphor-pentagon;29;448;448;64;64
+		phosphor-pentagram-bold;29;512;448;64;64
+		phosphor-pentagram-duotone;29;576;448;64;64
+		phosphor-pentagram-fill;29;640;448;64;64
+		phosphor-pentagram-light;29;704;448;64;64
+		phosphor-pentagram-thin;29;768;448;64;64
+		phosphor-pentagram;29;832;448;64;64
+		phosphor-pepper-bold;29;896;448;64;64
+		phosphor-pepper-duotone;29;960;448;64;64
+		phosphor-pepper-fill;29;0;512;64;64
+		phosphor-pepper-light;29;64;512;64;64
+		phosphor-pepper-thin;29;128;512;64;64
+		phosphor-pepper;29;192;512;64;64
+		phosphor-percent-bold;29;256;512;64;64
+		phosphor-percent-duotone;29;320;512;64;64
+		phosphor-percent-fill;29;384;512;64;64
+		phosphor-percent-light;29;448;512;64;64
+		phosphor-percent-thin;29;512;512;64;64
+		phosphor-percent;29;576;512;64;64
+		phosphor-person-arms-spread-bold;29;640;512;64;64
+		phosphor-person-arms-spread-duotone;29;704;512;64;64
+		phosphor-person-arms-spread-fill;29;768;512;64;64
+		phosphor-person-arms-spread-light;29;832;512;64;64
+		phosphor-person-arms-spread-thin;29;896;512;64;64
+		phosphor-person-arms-spread;29;960;512;64;64
+		phosphor-person-bold;29;0;576;64;64
+		phosphor-person-duotone;29;64;576;64;64
+		phosphor-person-fill;29;128;576;64;64
+		phosphor-person-light;29;192;576;64;64
+		phosphor-person-simple-bike-bold;29;256;576;64;64
+		phosphor-person-simple-bike-duotone;29;320;576;64;64
+		phosphor-person-simple-bike-fill;29;384;576;64;64
+		phosphor-person-simple-bike-light;29;448;576;64;64
+		phosphor-person-simple-bike-thin;29;512;576;64;64
+		phosphor-person-simple-bike;29;576;576;64;64
+		phosphor-person-simple-bold;29;640;576;64;64
+		phosphor-person-simple-circle-bold;29;704;576;64;64
+		phosphor-person-simple-circle-duotone;29;768;576;64;64
+		phosphor-person-simple-circle-fill;29;832;576;64;64
+		phosphor-person-simple-circle-light;29;896;576;64;64
+		phosphor-person-simple-circle-thin;29;960;576;64;64
+		phosphor-person-simple-circle;29;0;640;64;64
+		phosphor-person-simple-duotone;29;64;640;64;64
+		phosphor-person-simple-fill;29;128;640;64;64
+		phosphor-person-simple-hike-bold;29;192;640;64;64
+		phosphor-person-simple-hike-duotone;29;256;640;64;64
+		phosphor-person-simple-hike-fill;29;320;640;64;64
+		phosphor-person-simple-hike-light;29;384;640;64;64
+		phosphor-person-simple-hike-thin;29;448;640;64;64
+		phosphor-person-simple-hike;29;512;640;64;64
+		phosphor-person-simple-light;29;576;640;64;64
+		phosphor-person-simple-run-bold;29;640;640;64;64
+		phosphor-person-simple-run-duotone;29;704;640;64;64
+		phosphor-person-simple-run-fill;29;768;640;64;64
+		phosphor-person-simple-run-light;29;832;640;64;64
+		phosphor-person-simple-run-thin;29;896;640;64;64
+		phosphor-person-simple-run;29;960;640;64;64
+		phosphor-person-simple-ski-bold;29;0;704;64;64
+		phosphor-person-simple-ski-duotone;29;64;704;64;64
+		phosphor-person-simple-ski-fill;29;128;704;64;64
+		phosphor-person-simple-ski-light;29;192;704;64;64
+		phosphor-person-simple-ski-thin;29;256;704;64;64
+		phosphor-person-simple-ski;29;320;704;64;64
+		phosphor-person-simple-snowboard-bold;29;384;704;64;64
+		phosphor-person-simple-snowboard-duotone;29;448;704;64;64
+		phosphor-person-simple-snowboard-fill;29;512;704;64;64
+		phosphor-person-simple-snowboard-light;29;576;704;64;64
+		phosphor-person-simple-snowboard-thin;29;640;704;64;64
+		phosphor-person-simple-snowboard;29;704;704;64;64
+		phosphor-person-simple-swim-bold;29;768;704;64;64
+		phosphor-person-simple-swim-duotone;29;832;704;64;64
+		phosphor-person-simple-swim-fill;29;896;704;64;64
+		phosphor-person-simple-swim-light;29;960;704;64;64
+		phosphor-person-simple-swim-thin;29;0;768;64;64
+		phosphor-person-simple-swim;29;64;768;64;64
+		phosphor-person-simple-tai-chi-bold;29;128;768;64;64
+		phosphor-person-simple-tai-chi-duotone;29;192;768;64;64
+		phosphor-person-simple-tai-chi-fill;29;256;768;64;64
+		phosphor-person-simple-tai-chi-light;29;320;768;64;64
+		phosphor-person-simple-tai-chi-thin;29;384;768;64;64
+		phosphor-person-simple-tai-chi;29;448;768;64;64
+		phosphor-person-simple-thin;29;512;768;64;64
+		phosphor-person-simple-throw-bold;29;576;768;64;64
+		phosphor-person-simple-throw-duotone;29;640;768;64;64
+		phosphor-person-simple-throw-fill;29;704;768;64;64
+		phosphor-person-simple-throw-light;29;768;768;64;64
+		phosphor-person-simple-throw-thin;29;832;768;64;64
+		phosphor-person-simple-throw;29;896;768;64;64
+		phosphor-person-simple-walk-bold;29;960;768;64;64
+		phosphor-person-simple-walk-duotone;29;0;832;64;64
+		phosphor-person-simple-walk-fill;29;64;832;64;64
+		phosphor-person-simple-walk-light;29;128;832;64;64
+		phosphor-person-simple-walk-thin;29;192;832;64;64
+		phosphor-person-simple-walk;29;256;832;64;64
+		phosphor-person-simple;29;320;832;64;64
+		phosphor-person-thin;29;384;832;64;64
+		phosphor-person;29;448;832;64;64
+		phosphor-perspective-bold;29;512;832;64;64
+		phosphor-perspective-duotone;29;576;832;64;64
+		phosphor-perspective-fill;29;640;832;64;64
+		phosphor-perspective-light;29;704;832;64;64
+		phosphor-perspective-thin;29;768;832;64;64
+		phosphor-perspective;29;832;832;64;64
+		phosphor-phone-bold;29;896;832;64;64
+		phosphor-phone-call-bold;29;960;832;64;64
+		phosphor-phone-call-duotone;29;0;896;64;64
+		phosphor-phone-call-fill;29;64;896;64;64
+		phosphor-phone-call-light;29;128;896;64;64
+		phosphor-phone-call-thin;29;192;896;64;64
+		phosphor-phone-call;29;256;896;64;64
+		phosphor-phone-disconnect-bold;29;320;896;64;64
+		phosphor-phone-disconnect-duotone;29;384;896;64;64
+		phosphor-phone-disconnect-fill;29;448;896;64;64
+		phosphor-phone-disconnect-light;29;512;896;64;64
+		phosphor-phone-disconnect-thin;29;576;896;64;64
+		phosphor-phone-disconnect;29;640;896;64;64
+		phosphor-phone-duotone;29;704;896;64;64
+		phosphor-phone-fill;29;768;896;64;64
+		phosphor-phone-incoming-bold;29;832;896;64;64
+		phosphor-phone-incoming-duotone;29;896;896;64;64
+		phosphor-phone-incoming-fill;29;960;896;64;64
+		phosphor-phone-incoming-light;29;0;960;64;64
+		phosphor-phone-incoming-thin;29;64;960;64;64
+		phosphor-phone-incoming;29;128;960;64;64
+		phosphor-phone-light;29;192;960;64;64
+		phosphor-phone-list-bold;29;256;960;64;64
+		phosphor-phone-list-duotone;29;320;960;64;64
+		phosphor-phone-list-fill;29;384;960;64;64
+		phosphor-phone-list-light;29;448;960;64;64
+		phosphor-phone-list-thin;29;512;960;64;64
+		phosphor-phone-list;29;576;960;64;64
+		phosphor-phone-outgoing-bold;29;640;960;64;64
+		phosphor-phone-outgoing-duotone;29;704;960;64;64
+		phosphor-phone-outgoing-fill;29;768;960;64;64
+		phosphor-phone-outgoing-light;29;832;960;64;64
+		phosphor-phone-outgoing-thin;29;896;960;64;64
+		phosphor-phone-outgoing;29;960;960;64;64
+		phosphor-phone-pause-bold;30;0;0;64;64
+		phosphor-phone-pause-duotone;30;64;0;64;64
+		phosphor-phone-pause-fill;30;128;0;64;64
+		phosphor-phone-pause-light;30;192;0;64;64
+		phosphor-phone-pause-thin;30;256;0;64;64
+		phosphor-phone-pause;30;320;0;64;64
+		phosphor-phone-plus-bold;30;384;0;64;64
+		phosphor-phone-plus-duotone;30;448;0;64;64
+		phosphor-phone-plus-fill;30;512;0;64;64
+		phosphor-phone-plus-light;30;576;0;64;64
+		phosphor-phone-plus-thin;30;640;0;64;64
+		phosphor-phone-plus;30;704;0;64;64
+		phosphor-phone-slash-bold;30;768;0;64;64
+		phosphor-phone-slash-duotone;30;832;0;64;64
+		phosphor-phone-slash-fill;30;896;0;64;64
+		phosphor-phone-slash-light;30;960;0;64;64
+		phosphor-phone-slash-thin;30;0;64;64;64
+		phosphor-phone-slash;30;64;64;64;64
+		phosphor-phone-thin;30;128;64;64;64
+		phosphor-phone-transfer-bold;30;192;64;64;64
+		phosphor-phone-transfer-duotone;30;256;64;64;64
+		phosphor-phone-transfer-fill;30;320;64;64;64
+		phosphor-phone-transfer-light;30;384;64;64;64
+		phosphor-phone-transfer-thin;30;448;64;64;64
+		phosphor-phone-transfer;30;512;64;64;64
+		phosphor-phone-x-bold;30;576;64;64;64
+		phosphor-phone-x-duotone;30;640;64;64;64
+		phosphor-phone-x-fill;30;704;64;64;64
+		phosphor-phone-x-light;30;768;64;64;64
+		phosphor-phone-x-thin;30;832;64;64;64
+		phosphor-phone-x;30;896;64;64;64
+		phosphor-phone;30;960;64;64;64
+		phosphor-phosphor-logo-bold;30;0;128;64;64
+		phosphor-phosphor-logo-duotone;30;64;128;64;64
+		phosphor-phosphor-logo-fill;30;128;128;64;64
+		phosphor-phosphor-logo-light;30;192;128;64;64
+		phosphor-phosphor-logo-thin;30;256;128;64;64
+		phosphor-phosphor-logo;30;320;128;64;64
+		phosphor-pi-bold;30;384;128;64;64
+		phosphor-pi-duotone;30;448;128;64;64
+		phosphor-pi-fill;30;512;128;64;64
+		phosphor-pi-light;30;576;128;64;64
+		phosphor-pi-thin;30;640;128;64;64
+		phosphor-pi;30;704;128;64;64
+		phosphor-piano-keys-bold;30;768;128;64;64
+		phosphor-piano-keys-duotone;30;832;128;64;64
+		phosphor-piano-keys-fill;30;896;128;64;64
+		phosphor-piano-keys-light;30;960;128;64;64
+		phosphor-piano-keys-thin;30;0;192;64;64
+		phosphor-piano-keys;30;64;192;64;64
+		phosphor-picnic-table-bold;30;128;192;64;64
+		phosphor-picnic-table-duotone;30;192;192;64;64
+		phosphor-picnic-table-fill;30;256;192;64;64
+		phosphor-picnic-table-light;30;320;192;64;64
+		phosphor-picnic-table-thin;30;384;192;64;64
+		phosphor-picnic-table;30;448;192;64;64
+		phosphor-picture-in-picture-bold;30;512;192;64;64
+		phosphor-picture-in-picture-duotone;30;576;192;64;64
+		phosphor-picture-in-picture-fill;30;640;192;64;64
+		phosphor-picture-in-picture-light;30;704;192;64;64
+		phosphor-picture-in-picture-thin;30;768;192;64;64
+		phosphor-picture-in-picture;30;832;192;64;64
+		phosphor-piggy-bank-bold;30;896;192;64;64
+		phosphor-piggy-bank-duotone;30;960;192;64;64
+		phosphor-piggy-bank-fill;30;0;256;64;64
+		phosphor-piggy-bank-light;30;64;256;64;64
+		phosphor-piggy-bank-thin;30;128;256;64;64
+		phosphor-piggy-bank;30;192;256;64;64
+		phosphor-pill-bold;30;256;256;64;64
+		phosphor-pill-duotone;30;320;256;64;64
+		phosphor-pill-fill;30;384;256;64;64
+		phosphor-pill-light;30;448;256;64;64
+		phosphor-pill-thin;30;512;256;64;64
+		phosphor-pill;30;576;256;64;64
+		phosphor-ping-pong-bold;30;640;256;64;64
+		phosphor-ping-pong-duotone;30;704;256;64;64
+		phosphor-ping-pong-fill;30;768;256;64;64
+		phosphor-ping-pong-light;30;832;256;64;64
+		phosphor-ping-pong-thin;30;896;256;64;64
+		phosphor-ping-pong;30;960;256;64;64
+		phosphor-pint-glass-bold;30;0;320;64;64
+		phosphor-pint-glass-duotone;30;64;320;64;64
+		phosphor-pint-glass-fill;30;128;320;64;64
+		phosphor-pint-glass-light;30;192;320;64;64
+		phosphor-pint-glass-thin;30;256;320;64;64
+		phosphor-pint-glass;30;320;320;64;64
+		phosphor-pinterest-logo-bold;30;384;320;64;64
+		phosphor-pinterest-logo-duotone;30;448;320;64;64
+		phosphor-pinterest-logo-fill;30;512;320;64;64
+		phosphor-pinterest-logo-light;30;576;320;64;64
+		phosphor-pinterest-logo-thin;30;640;320;64;64
+		phosphor-pinterest-logo;30;704;320;64;64
+		phosphor-pinwheel-bold;30;768;320;64;64
+		phosphor-pinwheel-duotone;30;832;320;64;64
+		phosphor-pinwheel-fill;30;896;320;64;64
+		phosphor-pinwheel-light;30;960;320;64;64
+		phosphor-pinwheel-thin;30;0;384;64;64
+		phosphor-pinwheel;30;64;384;64;64
+		phosphor-pipe-bold;30;128;384;64;64
+		phosphor-pipe-duotone;30;192;384;64;64
+		phosphor-pipe-fill;30;256;384;64;64
+		phosphor-pipe-light;30;320;384;64;64
+		phosphor-pipe-thin;30;384;384;64;64
+		phosphor-pipe-wrench-bold;30;448;384;64;64
+		phosphor-pipe-wrench-duotone;30;512;384;64;64
+		phosphor-pipe-wrench-fill;30;576;384;64;64
+		phosphor-pipe-wrench-light;30;640;384;64;64
+		phosphor-pipe-wrench-thin;30;704;384;64;64
+		phosphor-pipe-wrench;30;768;384;64;64
+		phosphor-pipe;30;832;384;64;64
+		phosphor-pix-logo-bold;30;896;384;64;64
+		phosphor-pix-logo-duotone;30;960;384;64;64
+		phosphor-pix-logo-fill;30;0;448;64;64
+		phosphor-pix-logo-light;30;64;448;64;64
+		phosphor-pix-logo-thin;30;128;448;64;64
+		phosphor-pix-logo;30;192;448;64;64
+		phosphor-pizza-bold;30;256;448;64;64
+		phosphor-pizza-duotone;30;320;448;64;64
+		phosphor-pizza-fill;30;384;448;64;64
+		phosphor-pizza-light;30;448;448;64;64
+		phosphor-pizza-thin;30;512;448;64;64
+		phosphor-pizza;30;576;448;64;64
+		phosphor-placeholder-bold;30;640;448;64;64
+		phosphor-placeholder-duotone;30;704;448;64;64
+		phosphor-placeholder-fill;30;768;448;64;64
+		phosphor-placeholder-light;30;832;448;64;64
+		phosphor-placeholder-thin;30;896;448;64;64
+		phosphor-placeholder;30;960;448;64;64
+		phosphor-planet-bold;30;0;512;64;64
+		phosphor-planet-duotone;30;64;512;64;64
+		phosphor-planet-fill;30;128;512;64;64
+		phosphor-planet-light;30;192;512;64;64
+		phosphor-planet-thin;30;256;512;64;64
+		phosphor-planet;30;320;512;64;64
+		phosphor-plant-bold;30;384;512;64;64
+		phosphor-plant-duotone;30;448;512;64;64
+		phosphor-plant-fill;30;512;512;64;64
+		phosphor-plant-light;30;576;512;64;64
+		phosphor-plant-thin;30;640;512;64;64
+		phosphor-plant;30;704;512;64;64
+		phosphor-play-bold;30;768;512;64;64
+		phosphor-play-circle-bold;30;832;512;64;64
+		phosphor-play-circle-duotone;30;896;512;64;64
+		phosphor-play-circle-fill;30;960;512;64;64
+		phosphor-play-circle-light;30;0;576;64;64
+		phosphor-play-circle-thin;30;64;576;64;64
+		phosphor-play-circle;30;128;576;64;64
+		phosphor-play-duotone;30;192;576;64;64
+		phosphor-play-fill;30;256;576;64;64
+		phosphor-play-light;30;320;576;64;64
+		phosphor-play-pause-bold;30;384;576;64;64
+		phosphor-play-pause-duotone;30;448;576;64;64
+		phosphor-play-pause-fill;30;512;576;64;64
+		phosphor-play-pause-light;30;576;576;64;64
+		phosphor-play-pause-thin;30;640;576;64;64
+		phosphor-play-pause;30;704;576;64;64
+		phosphor-play-thin;30;768;576;64;64
+		phosphor-play;30;832;576;64;64
+		phosphor-playlist-bold;30;896;576;64;64
+		phosphor-playlist-duotone;30;960;576;64;64
+		phosphor-playlist-fill;30;0;640;64;64
+		phosphor-playlist-light;30;64;640;64;64
+		phosphor-playlist-thin;30;128;640;64;64
+		phosphor-playlist;30;192;640;64;64
+		phosphor-plug-bold;30;256;640;64;64
+		phosphor-plug-charging-bold;30;320;640;64;64
+		phosphor-plug-charging-duotone;30;384;640;64;64
+		phosphor-plug-charging-fill;30;448;640;64;64
+		phosphor-plug-charging-light;30;512;640;64;64
+		phosphor-plug-charging-thin;30;576;640;64;64
+		phosphor-plug-charging;30;640;640;64;64
+		phosphor-plug-duotone;30;704;640;64;64
+		phosphor-plug-fill;30;768;640;64;64
+		phosphor-plug-light;30;832;640;64;64
+		phosphor-plug-thin;30;896;640;64;64
+		phosphor-plug;30;960;640;64;64
+		phosphor-plugs-bold;30;0;704;64;64
+		phosphor-plugs-connected-bold;30;64;704;64;64
+		phosphor-plugs-connected-duotone;30;128;704;64;64
+		phosphor-plugs-connected-fill;30;192;704;64;64
+		phosphor-plugs-connected-light;30;256;704;64;64
+		phosphor-plugs-connected-thin;30;320;704;64;64
+		phosphor-plugs-connected;30;384;704;64;64
+		phosphor-plugs-duotone;30;448;704;64;64
+		phosphor-plugs-fill;30;512;704;64;64
+		phosphor-plugs-light;30;576;704;64;64
+		phosphor-plugs-thin;30;640;704;64;64
+		phosphor-plugs;30;704;704;64;64
+		phosphor-plus-bold;30;768;704;64;64
+		phosphor-plus-circle-bold;30;832;704;64;64
+		phosphor-plus-circle-duotone;30;896;704;64;64
+		phosphor-plus-circle-fill;30;960;704;64;64
+		phosphor-plus-circle-light;30;0;768;64;64
+		phosphor-plus-circle-thin;30;64;768;64;64
+		phosphor-plus-circle;30;128;768;64;64
+		phosphor-plus-duotone;30;192;768;64;64
+		phosphor-plus-fill;30;256;768;64;64
+		phosphor-plus-light;30;320;768;64;64
+		phosphor-plus-minus-bold;30;384;768;64;64
+		phosphor-plus-minus-duotone;30;448;768;64;64
+		phosphor-plus-minus-fill;30;512;768;64;64
+		phosphor-plus-minus-light;30;576;768;64;64
+		phosphor-plus-minus-thin;30;640;768;64;64
+		phosphor-plus-minus;30;704;768;64;64
+		phosphor-plus-square-bold;30;768;768;64;64
+		phosphor-plus-square-duotone;30;832;768;64;64
+		phosphor-plus-square-fill;30;896;768;64;64
+		phosphor-plus-square-light;30;960;768;64;64
+		phosphor-plus-square-thin;30;0;832;64;64
+		phosphor-plus-square;30;64;832;64;64
+		phosphor-plus-thin;30;128;832;64;64
+		phosphor-plus;30;192;832;64;64
+		phosphor-poker-chip-bold;30;256;832;64;64
+		phosphor-poker-chip-duotone;30;320;832;64;64
+		phosphor-poker-chip-fill;30;384;832;64;64
+		phosphor-poker-chip-light;30;448;832;64;64
+		phosphor-poker-chip-thin;30;512;832;64;64
+		phosphor-poker-chip;30;576;832;64;64
+		phosphor-police-car-bold;30;640;832;64;64
+		phosphor-police-car-duotone;30;704;832;64;64
+		phosphor-police-car-fill;30;768;832;64;64
+		phosphor-police-car-light;30;832;832;64;64
+		phosphor-police-car-thin;30;896;832;64;64
+		phosphor-police-car;30;960;832;64;64
+		phosphor-polygon-bold;30;0;896;64;64
+		phosphor-polygon-duotone;30;64;896;64;64
+		phosphor-polygon-fill;30;128;896;64;64
+		phosphor-polygon-light;30;192;896;64;64
+		phosphor-polygon-thin;30;256;896;64;64
+		phosphor-polygon;30;320;896;64;64
+		phosphor-popcorn-bold;30;384;896;64;64
+		phosphor-popcorn-duotone;30;448;896;64;64
+		phosphor-popcorn-fill;30;512;896;64;64
+		phosphor-popcorn-light;30;576;896;64;64
+		phosphor-popcorn-thin;30;640;896;64;64
+		phosphor-popcorn;30;704;896;64;64
+		phosphor-popsicle-bold;30;768;896;64;64
+		phosphor-popsicle-duotone;30;832;896;64;64
+		phosphor-popsicle-fill;30;896;896;64;64
+		phosphor-popsicle-light;30;960;896;64;64
+		phosphor-popsicle-thin;30;0;960;64;64
+		phosphor-popsicle;30;64;960;64;64
+		phosphor-potted-plant-bold;30;128;960;64;64
+		phosphor-potted-plant-duotone;30;192;960;64;64
+		phosphor-potted-plant-fill;30;256;960;64;64
+		phosphor-potted-plant-light;30;320;960;64;64
+		phosphor-potted-plant-thin;30;384;960;64;64
+		phosphor-potted-plant;30;448;960;64;64
+		phosphor-power-bold;30;512;960;64;64
+		phosphor-power-duotone;30;576;960;64;64
+		phosphor-power-fill;30;640;960;64;64
+		phosphor-power-light;30;704;960;64;64
+		phosphor-power-thin;30;768;960;64;64
+		phosphor-power;30;832;960;64;64
+		phosphor-prescription-bold;30;896;960;64;64
+		phosphor-prescription-duotone;30;960;960;64;64
+		phosphor-prescription-fill;31;0;0;64;64
+		phosphor-prescription-light;31;64;0;64;64
+		phosphor-prescription-thin;31;128;0;64;64
+		phosphor-prescription;31;192;0;64;64
+		phosphor-presentation-bold;31;256;0;64;64
+		phosphor-presentation-chart-bold;31;320;0;64;64
+		phosphor-presentation-chart-duotone;31;384;0;64;64
+		phosphor-presentation-chart-fill;31;448;0;64;64
+		phosphor-presentation-chart-light;31;512;0;64;64
+		phosphor-presentation-chart-thin;31;576;0;64;64
+		phosphor-presentation-chart;31;640;0;64;64
+		phosphor-presentation-duotone;31;704;0;64;64
+		phosphor-presentation-fill;31;768;0;64;64
+		phosphor-presentation-light;31;832;0;64;64
+		phosphor-presentation-thin;31;896;0;64;64
+		phosphor-presentation;31;960;0;64;64
+		phosphor-printer-bold;31;0;64;64;64
+		phosphor-printer-duotone;31;64;64;64;64
+		phosphor-printer-fill;31;128;64;64;64
+		phosphor-printer-light;31;192;64;64;64
+		phosphor-printer-thin;31;256;64;64;64
+		phosphor-printer;31;320;64;64;64
+		phosphor-prohibit-bold;31;384;64;64;64
+		phosphor-prohibit-duotone;31;448;64;64;64
+		phosphor-prohibit-fill;31;512;64;64;64
+		phosphor-prohibit-inset-bold;31;576;64;64;64
+		phosphor-prohibit-inset-duotone;31;640;64;64;64
+		phosphor-prohibit-inset-fill;31;704;64;64;64
+		phosphor-prohibit-inset-light;31;768;64;64;64
+		phosphor-prohibit-inset-thin;31;832;64;64;64
+		phosphor-prohibit-inset;31;896;64;64;64
+		phosphor-prohibit-light;31;960;64;64;64
+		phosphor-prohibit-thin;31;0;128;64;64
+		phosphor-prohibit;31;64;128;64;64
+		phosphor-projector-screen-bold;31;128;128;64;64
+		phosphor-projector-screen-chart-bold;31;192;128;64;64
+		phosphor-projector-screen-chart-duotone;31;256;128;64;64
+		phosphor-projector-screen-chart-fill;31;320;128;64;64
+		phosphor-projector-screen-chart-light;31;384;128;64;64
+		phosphor-projector-screen-chart-thin;31;448;128;64;64
+		phosphor-projector-screen-chart;31;512;128;64;64
+		phosphor-projector-screen-duotone;31;576;128;64;64
+		phosphor-projector-screen-fill;31;640;128;64;64
+		phosphor-projector-screen-light;31;704;128;64;64
+		phosphor-projector-screen-thin;31;768;128;64;64
+		phosphor-projector-screen;31;832;128;64;64
+		phosphor-pulse-bold;31;896;128;64;64
+		phosphor-pulse-duotone;31;960;128;64;64
+		phosphor-pulse-fill;31;0;192;64;64
+		phosphor-pulse-light;31;64;192;64;64
+		phosphor-pulse-thin;31;128;192;64;64
+		phosphor-pulse;31;192;192;64;64
+		phosphor-push-pin-bold;31;256;192;64;64
+		phosphor-push-pin-duotone;31;320;192;64;64
+		phosphor-push-pin-fill;31;384;192;64;64
+		phosphor-push-pin-light;31;448;192;64;64
+		phosphor-push-pin-simple-bold;31;512;192;64;64
+		phosphor-push-pin-simple-duotone;31;576;192;64;64
+		phosphor-push-pin-simple-fill;31;640;192;64;64
+		phosphor-push-pin-simple-light;31;704;192;64;64
+		phosphor-push-pin-simple-slash-bold;31;768;192;64;64
+		phosphor-push-pin-simple-slash-duotone;31;832;192;64;64
+		phosphor-push-pin-simple-slash-fill;31;896;192;64;64
+		phosphor-push-pin-simple-slash-light;31;960;192;64;64
+		phosphor-push-pin-simple-slash-thin;31;0;256;64;64
+		phosphor-push-pin-simple-slash;31;64;256;64;64
+		phosphor-push-pin-simple-thin;31;128;256;64;64
+		phosphor-push-pin-simple;31;192;256;64;64
+		phosphor-push-pin-slash-bold;31;256;256;64;64
+		phosphor-push-pin-slash-duotone;31;320;256;64;64
+		phosphor-push-pin-slash-fill;31;384;256;64;64
+		phosphor-push-pin-slash-light;31;448;256;64;64
+		phosphor-push-pin-slash-thin;31;512;256;64;64
+		phosphor-push-pin-slash;31;576;256;64;64
+		phosphor-push-pin-thin;31;640;256;64;64
+		phosphor-push-pin;31;704;256;64;64
+		phosphor-puzzle-piece-bold;31;768;256;64;64
+		phosphor-puzzle-piece-duotone;31;832;256;64;64
+		phosphor-puzzle-piece-fill;31;896;256;64;64
+		phosphor-puzzle-piece-light;31;960;256;64;64
+		phosphor-puzzle-piece-thin;31;0;320;64;64
+		phosphor-puzzle-piece;31;64;320;64;64
+		phosphor-qr-code-bold;31;128;320;64;64
+		phosphor-qr-code-duotone;31;192;320;64;64
+		phosphor-qr-code-fill;31;256;320;64;64
+		phosphor-qr-code-light;31;320;320;64;64
+		phosphor-qr-code-thin;31;384;320;64;64
+		phosphor-qr-code;31;448;320;64;64
+		phosphor-question-bold;31;512;320;64;64
+		phosphor-question-duotone;31;576;320;64;64
+		phosphor-question-fill;31;640;320;64;64
+		phosphor-question-light;31;704;320;64;64
+		phosphor-question-mark-bold;31;768;320;64;64
+		phosphor-question-mark-duotone;31;832;320;64;64
+		phosphor-question-mark-fill;31;896;320;64;64
+		phosphor-question-mark-light;31;960;320;64;64
+		phosphor-question-mark-thin;31;0;384;64;64
+		phosphor-question-mark;31;64;384;64;64
+		phosphor-question-thin;31;128;384;64;64
+		phosphor-question;31;192;384;64;64
+		phosphor-queue-bold;31;256;384;64;64
+		phosphor-queue-duotone;31;320;384;64;64
+		phosphor-queue-fill;31;384;384;64;64
+		phosphor-queue-light;31;448;384;64;64
+		phosphor-queue-thin;31;512;384;64;64
+		phosphor-queue;31;576;384;64;64
+		phosphor-quotes-bold;31;640;384;64;64
+		phosphor-quotes-duotone;31;704;384;64;64
+		phosphor-quotes-fill;31;768;384;64;64
+		phosphor-quotes-light;31;832;384;64;64
+		phosphor-quotes-thin;31;896;384;64;64
+		phosphor-quotes;31;960;384;64;64
+		phosphor-rabbit-bold;31;0;448;64;64
+		phosphor-rabbit-duotone;31;64;448;64;64
+		phosphor-rabbit-fill;31;128;448;64;64
+		phosphor-rabbit-light;31;192;448;64;64
+		phosphor-rabbit-thin;31;256;448;64;64
+		phosphor-rabbit;31;320;448;64;64
+		phosphor-racquet-bold;31;384;448;64;64
+		phosphor-racquet-duotone;31;448;448;64;64
+		phosphor-racquet-fill;31;512;448;64;64
+		phosphor-racquet-light;31;576;448;64;64
+		phosphor-racquet-thin;31;640;448;64;64
+		phosphor-racquet;31;704;448;64;64
+		phosphor-radical-bold;31;768;448;64;64
+		phosphor-radical-duotone;31;832;448;64;64
+		phosphor-radical-fill;31;896;448;64;64
+		phosphor-radical-light;31;960;448;64;64
+		phosphor-radical-thin;31;0;512;64;64
+		phosphor-radical;31;64;512;64;64
+		phosphor-radio-bold;31;128;512;64;64
+		phosphor-radio-button-bold;31;192;512;64;64
+		phosphor-radio-button-duotone;31;256;512;64;64
+		phosphor-radio-button-fill;31;320;512;64;64
+		phosphor-radio-button-light;31;384;512;64;64
+		phosphor-radio-button-thin;31;448;512;64;64
+		phosphor-radio-button;31;512;512;64;64
+		phosphor-radio-duotone;31;576;512;64;64
+		phosphor-radio-fill;31;640;512;64;64
+		phosphor-radio-light;31;704;512;64;64
+		phosphor-radio-thin;31;768;512;64;64
+		phosphor-radio;31;832;512;64;64
+		phosphor-radioactive-bold;31;896;512;64;64
+		phosphor-radioactive-duotone;31;960;512;64;64
+		phosphor-radioactive-fill;31;0;576;64;64
+		phosphor-radioactive-light;31;64;576;64;64
+		phosphor-radioactive-thin;31;128;576;64;64
+		phosphor-radioactive;31;192;576;64;64
+		phosphor-rainbow-bold;31;256;576;64;64
+		phosphor-rainbow-cloud-bold;31;320;576;64;64
+		phosphor-rainbow-cloud-duotone;31;384;576;64;64
+		phosphor-rainbow-cloud-fill;31;448;576;64;64
+		phosphor-rainbow-cloud-light;31;512;576;64;64
+		phosphor-rainbow-cloud-thin;31;576;576;64;64
+		phosphor-rainbow-cloud;31;640;576;64;64
+		phosphor-rainbow-duotone;31;704;576;64;64
+		phosphor-rainbow-fill;31;768;576;64;64
+		phosphor-rainbow-light;31;832;576;64;64
+		phosphor-rainbow-thin;31;896;576;64;64
+		phosphor-rainbow;31;960;576;64;64
+		phosphor-ranking-bold;31;0;640;64;64
+		phosphor-ranking-duotone;31;64;640;64;64
+		phosphor-ranking-fill;31;128;640;64;64
+		phosphor-ranking-light;31;192;640;64;64
+		phosphor-ranking-thin;31;256;640;64;64
+		phosphor-ranking;31;320;640;64;64
+		phosphor-read-cv-logo-bold;31;384;640;64;64
+		phosphor-read-cv-logo-duotone;31;448;640;64;64
+		phosphor-read-cv-logo-fill;31;512;640;64;64
+		phosphor-read-cv-logo-light;31;576;640;64;64
+		phosphor-read-cv-logo-thin;31;640;640;64;64
+		phosphor-read-cv-logo;31;704;640;64;64
+		phosphor-receipt-bold;31;768;640;64;64
+		phosphor-receipt-duotone;31;832;640;64;64
+		phosphor-receipt-fill;31;896;640;64;64
+		phosphor-receipt-light;31;960;640;64;64
+		phosphor-receipt-thin;31;0;704;64;64
+		phosphor-receipt-x-bold;31;64;704;64;64
+		phosphor-receipt-x-duotone;31;128;704;64;64
+		phosphor-receipt-x-fill;31;192;704;64;64
+		phosphor-receipt-x-light;31;256;704;64;64
+		phosphor-receipt-x-thin;31;320;704;64;64
+		phosphor-receipt-x;31;384;704;64;64
+		phosphor-receipt;31;448;704;64;64
+		phosphor-record-bold;31;512;704;64;64
+		phosphor-record-duotone;31;576;704;64;64
+		phosphor-record-fill;31;640;704;64;64
+		phosphor-record-light;31;704;704;64;64
+		phosphor-record-thin;31;768;704;64;64
+		phosphor-record;31;832;704;64;64
+		phosphor-rectangle-bold;31;896;704;64;64
+		phosphor-rectangle-dashed-bold;31;960;704;64;64
+		phosphor-rectangle-dashed-duotone;31;0;768;64;64
+		phosphor-rectangle-dashed-fill;31;64;768;64;64
+		phosphor-rectangle-dashed-light;31;128;768;64;64
+		phosphor-rectangle-dashed-thin;31;192;768;64;64
+		phosphor-rectangle-dashed;31;256;768;64;64
+		phosphor-rectangle-duotone;31;320;768;64;64
+		phosphor-rectangle-fill;31;384;768;64;64
+		phosphor-rectangle-light;31;448;768;64;64
+		phosphor-rectangle-thin;31;512;768;64;64
+		phosphor-rectangle;31;576;768;64;64
+		phosphor-recycle-bold;31;640;768;64;64
+		phosphor-recycle-duotone;31;704;768;64;64
+		phosphor-recycle-fill;31;768;768;64;64
+		phosphor-recycle-light;31;832;768;64;64
+		phosphor-recycle-thin;31;896;768;64;64
+		phosphor-recycle;31;960;768;64;64
+		phosphor-reddit-logo-bold;31;0;832;64;64
+		phosphor-reddit-logo-duotone;31;64;832;64;64
+		phosphor-reddit-logo-fill;31;128;832;64;64
+		phosphor-reddit-logo-light;31;192;832;64;64
+		phosphor-reddit-logo-thin;31;256;832;64;64
+		phosphor-reddit-logo;31;320;832;64;64
+		phosphor-repeat-bold;31;384;832;64;64
+		phosphor-repeat-duotone;31;448;832;64;64
+		phosphor-repeat-fill;31;512;832;64;64
+		phosphor-repeat-light;31;576;832;64;64
+		phosphor-repeat-once-bold;31;640;832;64;64
+		phosphor-repeat-once-duotone;31;704;832;64;64
+		phosphor-repeat-once-fill;31;768;832;64;64
+		phosphor-repeat-once-light;31;832;832;64;64
+		phosphor-repeat-once-thin;31;896;832;64;64
+		phosphor-repeat-once;31;960;832;64;64
+		phosphor-repeat-thin;31;0;896;64;64
+		phosphor-repeat;31;64;896;64;64
+		phosphor-replit-logo-bold;31;128;896;64;64
+		phosphor-replit-logo-duotone;31;192;896;64;64
+		phosphor-replit-logo-fill;31;256;896;64;64
+		phosphor-replit-logo-light;31;320;896;64;64
+		phosphor-replit-logo-thin;31;384;896;64;64
+		phosphor-replit-logo;31;448;896;64;64
+		phosphor-resize-bold;31;512;896;64;64
+		phosphor-resize-duotone;31;576;896;64;64
+		phosphor-resize-fill;31;640;896;64;64
+		phosphor-resize-light;31;704;896;64;64
+		phosphor-resize-thin;31;768;896;64;64
+		phosphor-resize;31;832;896;64;64
+		phosphor-rewind-bold;31;896;896;64;64
+		phosphor-rewind-circle-bold;31;960;896;64;64
+		phosphor-rewind-circle-duotone;31;0;960;64;64
+		phosphor-rewind-circle-fill;31;64;960;64;64
+		phosphor-rewind-circle-light;31;128;960;64;64
+		phosphor-rewind-circle-thin;31;192;960;64;64
+		phosphor-rewind-circle;31;256;960;64;64
+		phosphor-rewind-duotone;31;320;960;64;64
+		phosphor-rewind-fill;31;384;960;64;64
+		phosphor-rewind-light;31;448;960;64;64
+		phosphor-rewind-thin;31;512;960;64;64
+		phosphor-rewind;31;576;960;64;64
+		phosphor-road-horizon-bold;31;640;960;64;64
+		phosphor-road-horizon-duotone;31;704;960;64;64
+		phosphor-road-horizon-fill;31;768;960;64;64
+		phosphor-road-horizon-light;31;832;960;64;64
+		phosphor-road-horizon-thin;31;896;960;64;64
+		phosphor-road-horizon;31;960;960;64;64
+		phosphor-robot-bold;32;0;0;64;64
+		phosphor-robot-duotone;32;64;0;64;64
+		phosphor-robot-fill;32;128;0;64;64
+		phosphor-robot-light;32;192;0;64;64
+		phosphor-robot-thin;32;256;0;64;64
+		phosphor-robot;32;320;0;64;64
+		phosphor-rocket-bold;32;384;0;64;64
+		phosphor-rocket-duotone;32;448;0;64;64
+		phosphor-rocket-fill;32;512;0;64;64
+		phosphor-rocket-launch-bold;32;576;0;64;64
+		phosphor-rocket-launch-duotone;32;640;0;64;64
+		phosphor-rocket-launch-fill;32;704;0;64;64
+		phosphor-rocket-launch-light;32;768;0;64;64
+		phosphor-rocket-launch-thin;32;832;0;64;64
+		phosphor-rocket-launch;32;896;0;64;64
+		phosphor-rocket-light;32;960;0;64;64
+		phosphor-rocket-thin;32;0;64;64;64
+		phosphor-rocket;32;64;64;64;64
+		phosphor-rows-bold;32;128;64;64;64
+		phosphor-rows-duotone;32;192;64;64;64
+		phosphor-rows-fill;32;256;64;64;64
+		phosphor-rows-light;32;320;64;64;64
+		phosphor-rows-plus-bottom-bold;32;384;64;64;64
+		phosphor-rows-plus-bottom-duotone;32;448;64;64;64
+		phosphor-rows-plus-bottom-fill;32;512;64;64;64
+		phosphor-rows-plus-bottom-light;32;576;64;64;64
+		phosphor-rows-plus-bottom-thin;32;640;64;64;64
+		phosphor-rows-plus-bottom;32;704;64;64;64
+		phosphor-rows-plus-top-bold;32;768;64;64;64
+		phosphor-rows-plus-top-duotone;32;832;64;64;64
+		phosphor-rows-plus-top-fill;32;896;64;64;64
+		phosphor-rows-plus-top-light;32;960;64;64;64
+		phosphor-rows-plus-top-thin;32;0;128;64;64
+		phosphor-rows-plus-top;32;64;128;64;64
+		phosphor-rows-thin;32;128;128;64;64
+		phosphor-rows;32;192;128;64;64
+		phosphor-rss-bold;32;256;128;64;64
+		phosphor-rss-duotone;32;320;128;64;64
+		phosphor-rss-fill;32;384;128;64;64
+		phosphor-rss-light;32;448;128;64;64
+		phosphor-rss-simple-bold;32;512;128;64;64
+		phosphor-rss-simple-duotone;32;576;128;64;64
+		phosphor-rss-simple-fill;32;640;128;64;64
+		phosphor-rss-simple-light;32;704;128;64;64
+		phosphor-rss-simple-thin;32;768;128;64;64
+		phosphor-rss-simple;32;832;128;64;64
+		phosphor-rss-thin;32;896;128;64;64
+		phosphor-rss;32;960;128;64;64
+		phosphor-rug-bold;32;0;192;64;64
+		phosphor-rug-duotone;32;64;192;64;64
+		phosphor-rug-fill;32;128;192;64;64
+		phosphor-rug-light;32;192;192;64;64
+		phosphor-rug-thin;32;256;192;64;64
+		phosphor-rug;32;320;192;64;64
+		phosphor-ruler-bold;32;384;192;64;64
+		phosphor-ruler-duotone;32;448;192;64;64
+		phosphor-ruler-fill;32;512;192;64;64
+		phosphor-ruler-light;32;576;192;64;64
+		phosphor-ruler-thin;32;640;192;64;64
+		phosphor-ruler;32;704;192;64;64
+		phosphor-sailboat-bold;32;768;192;64;64
+		phosphor-sailboat-duotone;32;832;192;64;64
+		phosphor-sailboat-fill;32;896;192;64;64
+		phosphor-sailboat-light;32;960;192;64;64
+		phosphor-sailboat-thin;32;0;256;64;64
+		phosphor-sailboat;32;64;256;64;64
+		phosphor-scales-bold;32;128;256;64;64
+		phosphor-scales-duotone;32;192;256;64;64
+		phosphor-scales-fill;32;256;256;64;64
+		phosphor-scales-light;32;320;256;64;64
+		phosphor-scales-thin;32;384;256;64;64
+		phosphor-scales;32;448;256;64;64
+		phosphor-scan-bold;32;512;256;64;64
+		phosphor-scan-duotone;32;576;256;64;64
+		phosphor-scan-fill;32;640;256;64;64
+		phosphor-scan-light;32;704;256;64;64
+		phosphor-scan-smiley-bold;32;768;256;64;64
+		phosphor-scan-smiley-duotone;32;832;256;64;64
+		phosphor-scan-smiley-fill;32;896;256;64;64
+		phosphor-scan-smiley-light;32;960;256;64;64
+		phosphor-scan-smiley-thin;32;0;320;64;64
+		phosphor-scan-smiley;32;64;320;64;64
+		phosphor-scan-thin;32;128;320;64;64
+		phosphor-scan;32;192;320;64;64
+		phosphor-scissors-bold;32;256;320;64;64
+		phosphor-scissors-duotone;32;320;320;64;64
+		phosphor-scissors-fill;32;384;320;64;64
+		phosphor-scissors-light;32;448;320;64;64
+		phosphor-scissors-thin;32;512;320;64;64
+		phosphor-scissors;32;576;320;64;64
+		phosphor-scooter-bold;32;640;320;64;64
+		phosphor-scooter-duotone;32;704;320;64;64
+		phosphor-scooter-fill;32;768;320;64;64
+		phosphor-scooter-light;32;832;320;64;64
+		phosphor-scooter-thin;32;896;320;64;64
+		phosphor-scooter;32;960;320;64;64
+		phosphor-screencast-bold;32;0;384;64;64
+		phosphor-screencast-duotone;32;64;384;64;64
+		phosphor-screencast-fill;32;128;384;64;64
+		phosphor-screencast-light;32;192;384;64;64
+		phosphor-screencast-thin;32;256;384;64;64
+		phosphor-screencast;32;320;384;64;64
+		phosphor-screwdriver-bold;32;384;384;64;64
+		phosphor-screwdriver-duotone;32;448;384;64;64
+		phosphor-screwdriver-fill;32;512;384;64;64
+		phosphor-screwdriver-light;32;576;384;64;64
+		phosphor-screwdriver-thin;32;640;384;64;64
+		phosphor-screwdriver;32;704;384;64;64
+		phosphor-scribble-bold;32;768;384;64;64
+		phosphor-scribble-duotone;32;832;384;64;64
+		phosphor-scribble-fill;32;896;384;64;64
+		phosphor-scribble-light;32;960;384;64;64
+		phosphor-scribble-loop-bold;32;0;448;64;64
+		phosphor-scribble-loop-duotone;32;64;448;64;64
+		phosphor-scribble-loop-fill;32;128;448;64;64
+		phosphor-scribble-loop-light;32;192;448;64;64
+		phosphor-scribble-loop-thin;32;256;448;64;64
+		phosphor-scribble-loop;32;320;448;64;64
+		phosphor-scribble-thin;32;384;448;64;64
+		phosphor-scribble;32;448;448;64;64
+		phosphor-scroll-bold;32;512;448;64;64
+		phosphor-scroll-duotone;32;576;448;64;64
+		phosphor-scroll-fill;32;640;448;64;64
+		phosphor-scroll-light;32;704;448;64;64
+		phosphor-scroll-thin;32;768;448;64;64
+		phosphor-scroll;32;832;448;64;64
+		phosphor-seal-bold;32;896;448;64;64
+		phosphor-seal-check-bold;32;960;448;64;64
+		phosphor-seal-check-duotone;32;0;512;64;64
+		phosphor-seal-check-fill;32;64;512;64;64
+		phosphor-seal-check-light;32;128;512;64;64
+		phosphor-seal-check-thin;32;192;512;64;64
+		phosphor-seal-check;32;256;512;64;64
+		phosphor-seal-duotone;32;320;512;64;64
+		phosphor-seal-fill;32;384;512;64;64
+		phosphor-seal-light;32;448;512;64;64
+		phosphor-seal-percent-bold;32;512;512;64;64
+		phosphor-seal-percent-duotone;32;576;512;64;64
+		phosphor-seal-percent-fill;32;640;512;64;64
+		phosphor-seal-percent-light;32;704;512;64;64
+		phosphor-seal-percent-thin;32;768;512;64;64
+		phosphor-seal-percent;32;832;512;64;64
+		phosphor-seal-question-bold;32;896;512;64;64
+		phosphor-seal-question-duotone;32;960;512;64;64
+		phosphor-seal-question-fill;32;0;576;64;64
+		phosphor-seal-question-light;32;64;576;64;64
+		phosphor-seal-question-thin;32;128;576;64;64
+		phosphor-seal-question;32;192;576;64;64
+		phosphor-seal-thin;32;256;576;64;64
+		phosphor-seal-warning-bold;32;320;576;64;64
+		phosphor-seal-warning-duotone;32;384;576;64;64
+		phosphor-seal-warning-fill;32;448;576;64;64
+		phosphor-seal-warning-light;32;512;576;64;64
+		phosphor-seal-warning-thin;32;576;576;64;64
+		phosphor-seal-warning;32;640;576;64;64
+		phosphor-seal;32;704;576;64;64
+		phosphor-seat-bold;32;768;576;64;64
+		phosphor-seat-duotone;32;832;576;64;64
+		phosphor-seat-fill;32;896;576;64;64
+		phosphor-seat-light;32;960;576;64;64
+		phosphor-seat-thin;32;0;640;64;64
+		phosphor-seat;32;64;640;64;64
+		phosphor-seatbelt-bold;32;128;640;64;64
+		phosphor-seatbelt-duotone;32;192;640;64;64
+		phosphor-seatbelt-fill;32;256;640;64;64
+		phosphor-seatbelt-light;32;320;640;64;64
+		phosphor-seatbelt-thin;32;384;640;64;64
+		phosphor-seatbelt;32;448;640;64;64
+		phosphor-security-camera-bold;32;512;640;64;64
+		phosphor-security-camera-duotone;32;576;640;64;64
+		phosphor-security-camera-fill;32;640;640;64;64
+		phosphor-security-camera-light;32;704;640;64;64
+		phosphor-security-camera-thin;32;768;640;64;64
+		phosphor-security-camera;32;832;640;64;64
+		phosphor-selection-all-bold;32;896;640;64;64
+		phosphor-selection-all-duotone;32;960;640;64;64
+		phosphor-selection-all-fill;32;0;704;64;64
+		phosphor-selection-all-light;32;64;704;64;64
+		phosphor-selection-all-thin;32;128;704;64;64
+		phosphor-selection-all;32;192;704;64;64
+		phosphor-selection-background-bold;32;256;704;64;64
+		phosphor-selection-background-duotone;32;320;704;64;64
+		phosphor-selection-background-fill;32;384;704;64;64
+		phosphor-selection-background-light;32;448;704;64;64
+		phosphor-selection-background-thin;32;512;704;64;64
+		phosphor-selection-background;32;576;704;64;64
+		phosphor-selection-bold;32;640;704;64;64
+		phosphor-selection-duotone;32;704;704;64;64
+		phosphor-selection-fill;32;768;704;64;64
+		phosphor-selection-foreground-bold;32;832;704;64;64
+		phosphor-selection-foreground-duotone;32;896;704;64;64
+		phosphor-selection-foreground-fill;32;960;704;64;64
+		phosphor-selection-foreground-light;32;0;768;64;64
+		phosphor-selection-foreground-thin;32;64;768;64;64
+		phosphor-selection-foreground;32;128;768;64;64
+		phosphor-selection-inverse-bold;32;192;768;64;64
+		phosphor-selection-inverse-duotone;32;256;768;64;64
+		phosphor-selection-inverse-fill;32;320;768;64;64
+		phosphor-selection-inverse-light;32;384;768;64;64
+		phosphor-selection-inverse-thin;32;448;768;64;64
+		phosphor-selection-inverse;32;512;768;64;64
+		phosphor-selection-light;32;576;768;64;64
+		phosphor-selection-plus-bold;32;640;768;64;64
+		phosphor-selection-plus-duotone;32;704;768;64;64
+		phosphor-selection-plus-fill;32;768;768;64;64
+		phosphor-selection-plus-light;32;832;768;64;64
+		phosphor-selection-plus-thin;32;896;768;64;64
+		phosphor-selection-plus;32;960;768;64;64
+		phosphor-selection-slash-bold;32;0;832;64;64
+		phosphor-selection-slash-duotone;32;64;832;64;64
+		phosphor-selection-slash-fill;32;128;832;64;64
+		phosphor-selection-slash-light;32;192;832;64;64
+		phosphor-selection-slash-thin;32;256;832;64;64
+		phosphor-selection-slash;32;320;832;64;64
+		phosphor-selection-thin;32;384;832;64;64
+		phosphor-selection;32;448;832;64;64
+		phosphor-shapes-bold;32;512;832;64;64
+		phosphor-shapes-duotone;32;576;832;64;64
+		phosphor-shapes-fill;32;640;832;64;64
+		phosphor-shapes-light;32;704;832;64;64
+		phosphor-shapes-thin;32;768;832;64;64
+		phosphor-shapes;32;832;832;64;64
+		phosphor-share-bold;32;896;832;64;64
+		phosphor-share-duotone;32;960;832;64;64
+		phosphor-share-fat-bold;32;0;896;64;64
+		phosphor-share-fat-duotone;32;64;896;64;64
+		phosphor-share-fat-fill;32;128;896;64;64
+		phosphor-share-fat-light;32;192;896;64;64
+		phosphor-share-fat-thin;32;256;896;64;64
+		phosphor-share-fat;32;320;896;64;64
+		phosphor-share-fill;32;384;896;64;64
+		phosphor-share-light;32;448;896;64;64
+		phosphor-share-network-bold;32;512;896;64;64
+		phosphor-share-network-duotone;32;576;896;64;64
+		phosphor-share-network-fill;32;640;896;64;64
+		phosphor-share-network-light;32;704;896;64;64
+		phosphor-share-network-thin;32;768;896;64;64
+		phosphor-share-network;32;832;896;64;64
+		phosphor-share-thin;32;896;896;64;64
+		phosphor-share;32;960;896;64;64
+		phosphor-shield-bold;32;0;960;64;64
+		phosphor-shield-check-bold;32;64;960;64;64
+		phosphor-shield-check-duotone;32;128;960;64;64
+		phosphor-shield-check-fill;32;192;960;64;64
+		phosphor-shield-check-light;32;256;960;64;64
+		phosphor-shield-check-thin;32;320;960;64;64
+		phosphor-shield-check;32;384;960;64;64
+		phosphor-shield-checkered-bold;32;448;960;64;64
+		phosphor-shield-checkered-duotone;32;512;960;64;64
+		phosphor-shield-checkered-fill;32;576;960;64;64
+		phosphor-shield-checkered-light;32;640;960;64;64
+		phosphor-shield-checkered-thin;32;704;960;64;64
+		phosphor-shield-checkered;32;768;960;64;64
+		phosphor-shield-chevron-bold;32;832;960;64;64
+		phosphor-shield-chevron-duotone;32;896;960;64;64
+		phosphor-shield-chevron-fill;32;960;960;64;64
+		phosphor-shield-chevron-light;33;0;0;64;64
+		phosphor-shield-chevron-thin;33;64;0;64;64
+		phosphor-shield-chevron;33;128;0;64;64
+		phosphor-shield-duotone;33;192;0;64;64
+		phosphor-shield-fill;33;256;0;64;64
+		phosphor-shield-light;33;320;0;64;64
+		phosphor-shield-plus-bold;33;384;0;64;64
+		phosphor-shield-plus-duotone;33;448;0;64;64
+		phosphor-shield-plus-fill;33;512;0;64;64
+		phosphor-shield-plus-light;33;576;0;64;64
+		phosphor-shield-plus-thin;33;640;0;64;64
+		phosphor-shield-plus;33;704;0;64;64
+		phosphor-shield-slash-bold;33;768;0;64;64
+		phosphor-shield-slash-duotone;33;832;0;64;64
+		phosphor-shield-slash-fill;33;896;0;64;64
+		phosphor-shield-slash-light;33;960;0;64;64
+		phosphor-shield-slash-thin;33;0;64;64;64
+		phosphor-shield-slash;33;64;64;64;64
+		phosphor-shield-star-bold;33;128;64;64;64
+		phosphor-shield-star-duotone;33;192;64;64;64
+		phosphor-shield-star-fill;33;256;64;64;64
+		phosphor-shield-star-light;33;320;64;64;64
+		phosphor-shield-star-thin;33;384;64;64;64
+		phosphor-shield-star;33;448;64;64;64
+		phosphor-shield-thin;33;512;64;64;64
+		phosphor-shield-warning-bold;33;576;64;64;64
+		phosphor-shield-warning-duotone;33;640;64;64;64
+		phosphor-shield-warning-fill;33;704;64;64;64
+		phosphor-shield-warning-light;33;768;64;64;64
+		phosphor-shield-warning-thin;33;832;64;64;64
+		phosphor-shield-warning;33;896;64;64;64
+		phosphor-shield;33;960;64;64;64
+		phosphor-shipping-container-bold;33;0;128;64;64
+		phosphor-shipping-container-duotone;33;64;128;64;64
+		phosphor-shipping-container-fill;33;128;128;64;64
+		phosphor-shipping-container-light;33;192;128;64;64
+		phosphor-shipping-container-thin;33;256;128;64;64
+		phosphor-shipping-container;33;320;128;64;64
+		phosphor-shirt-folded-bold;33;384;128;64;64
+		phosphor-shirt-folded-duotone;33;448;128;64;64
+		phosphor-shirt-folded-fill;33;512;128;64;64
+		phosphor-shirt-folded-light;33;576;128;64;64
+		phosphor-shirt-folded-thin;33;640;128;64;64
+		phosphor-shirt-folded;33;704;128;64;64
+		phosphor-shooting-star-bold;33;768;128;64;64
+		phosphor-shooting-star-duotone;33;832;128;64;64
+		phosphor-shooting-star-fill;33;896;128;64;64
+		phosphor-shooting-star-light;33;960;128;64;64
+		phosphor-shooting-star-thin;33;0;192;64;64
+		phosphor-shooting-star;33;64;192;64;64
+		phosphor-shopping-bag-bold;33;128;192;64;64
+		phosphor-shopping-bag-duotone;33;192;192;64;64
+		phosphor-shopping-bag-fill;33;256;192;64;64
+		phosphor-shopping-bag-light;33;320;192;64;64
+		phosphor-shopping-bag-open-bold;33;384;192;64;64
+		phosphor-shopping-bag-open-duotone;33;448;192;64;64
+		phosphor-shopping-bag-open-fill;33;512;192;64;64
+		phosphor-shopping-bag-open-light;33;576;192;64;64
+		phosphor-shopping-bag-open-thin;33;640;192;64;64
+		phosphor-shopping-bag-open;33;704;192;64;64
+		phosphor-shopping-bag-thin;33;768;192;64;64
+		phosphor-shopping-bag;33;832;192;64;64
+		phosphor-shopping-cart-bold;33;896;192;64;64
+		phosphor-shopping-cart-duotone;33;960;192;64;64
+		phosphor-shopping-cart-fill;33;0;256;64;64
+		phosphor-shopping-cart-light;33;64;256;64;64
+		phosphor-shopping-cart-simple-bold;33;128;256;64;64
+		phosphor-shopping-cart-simple-duotone;33;192;256;64;64
+		phosphor-shopping-cart-simple-fill;33;256;256;64;64
+		phosphor-shopping-cart-simple-light;33;320;256;64;64
+		phosphor-shopping-cart-simple-thin;33;384;256;64;64
+		phosphor-shopping-cart-simple;33;448;256;64;64
+		phosphor-shopping-cart-thin;33;512;256;64;64
+		phosphor-shopping-cart;33;576;256;64;64
+		phosphor-shovel-bold;33;640;256;64;64
+		phosphor-shovel-duotone;33;704;256;64;64
+		phosphor-shovel-fill;33;768;256;64;64
+		phosphor-shovel-light;33;832;256;64;64
+		phosphor-shovel-thin;33;896;256;64;64
+		phosphor-shovel;33;960;256;64;64
+		phosphor-shower-bold;33;0;320;64;64
+		phosphor-shower-duotone;33;64;320;64;64
+		phosphor-shower-fill;33;128;320;64;64
+		phosphor-shower-light;33;192;320;64;64
+		phosphor-shower-thin;33;256;320;64;64
+		phosphor-shower;33;320;320;64;64
+		phosphor-shrimp-bold;33;384;320;64;64
+		phosphor-shrimp-duotone;33;448;320;64;64
+		phosphor-shrimp-fill;33;512;320;64;64
+		phosphor-shrimp-light;33;576;320;64;64
+		phosphor-shrimp-thin;33;640;320;64;64
+		phosphor-shrimp;33;704;320;64;64
+		phosphor-shuffle-angular-bold;33;768;320;64;64
+		phosphor-shuffle-angular-duotone;33;832;320;64;64
+		phosphor-shuffle-angular-fill;33;896;320;64;64
+		phosphor-shuffle-angular-light;33;960;320;64;64
+		phosphor-shuffle-angular-thin;33;0;384;64;64
+		phosphor-shuffle-angular;33;64;384;64;64
+		phosphor-shuffle-bold;33;128;384;64;64
+		phosphor-shuffle-duotone;33;192;384;64;64
+		phosphor-shuffle-fill;33;256;384;64;64
+		phosphor-shuffle-light;33;320;384;64;64
+		phosphor-shuffle-simple-bold;33;384;384;64;64
+		phosphor-shuffle-simple-duotone;33;448;384;64;64
+		phosphor-shuffle-simple-fill;33;512;384;64;64
+		phosphor-shuffle-simple-light;33;576;384;64;64
+		phosphor-shuffle-simple-thin;33;640;384;64;64
+		phosphor-shuffle-simple;33;704;384;64;64
+		phosphor-shuffle-thin;33;768;384;64;64
+		phosphor-shuffle;33;832;384;64;64
+		phosphor-sidebar-bold;33;896;384;64;64
+		phosphor-sidebar-duotone;33;960;384;64;64
+		phosphor-sidebar-fill;33;0;448;64;64
+		phosphor-sidebar-light;33;64;448;64;64
+		phosphor-sidebar-simple-bold;33;128;448;64;64
+		phosphor-sidebar-simple-duotone;33;192;448;64;64
+		phosphor-sidebar-simple-fill;33;256;448;64;64
+		phosphor-sidebar-simple-light;33;320;448;64;64
+		phosphor-sidebar-simple-thin;33;384;448;64;64
+		phosphor-sidebar-simple;33;448;448;64;64
+		phosphor-sidebar-thin;33;512;448;64;64
+		phosphor-sidebar;33;576;448;64;64
+		phosphor-sigma-bold;33;640;448;64;64
+		phosphor-sigma-duotone;33;704;448;64;64
+		phosphor-sigma-fill;33;768;448;64;64
+		phosphor-sigma-light;33;832;448;64;64
+		phosphor-sigma-thin;33;896;448;64;64
+		phosphor-sigma;33;960;448;64;64
+		phosphor-sign-in-bold;33;0;512;64;64
+		phosphor-sign-in-duotone;33;64;512;64;64
+		phosphor-sign-in-fill;33;128;512;64;64
+		phosphor-sign-in-light;33;192;512;64;64
+		phosphor-sign-in-thin;33;256;512;64;64
+		phosphor-sign-in;33;320;512;64;64
+		phosphor-sign-out-bold;33;384;512;64;64
+		phosphor-sign-out-duotone;33;448;512;64;64
+		phosphor-sign-out-fill;33;512;512;64;64
+		phosphor-sign-out-light;33;576;512;64;64
+		phosphor-sign-out-thin;33;640;512;64;64
+		phosphor-sign-out;33;704;512;64;64
+		phosphor-signature-bold;33;768;512;64;64
+		phosphor-signature-duotone;33;832;512;64;64
+		phosphor-signature-fill;33;896;512;64;64
+		phosphor-signature-light;33;960;512;64;64
+		phosphor-signature-thin;33;0;576;64;64
+		phosphor-signature;33;64;576;64;64
+		phosphor-signpost-bold;33;128;576;64;64
+		phosphor-signpost-duotone;33;192;576;64;64
+		phosphor-signpost-fill;33;256;576;64;64
+		phosphor-signpost-light;33;320;576;64;64
+		phosphor-signpost-thin;33;384;576;64;64
+		phosphor-signpost;33;448;576;64;64
+		phosphor-sim-card-bold;33;512;576;64;64
+		phosphor-sim-card-duotone;33;576;576;64;64
+		phosphor-sim-card-fill;33;640;576;64;64
+		phosphor-sim-card-light;33;704;576;64;64
+		phosphor-sim-card-thin;33;768;576;64;64
+		phosphor-sim-card;33;832;576;64;64
+		phosphor-siren-bold;33;896;576;64;64
+		phosphor-siren-duotone;33;960;576;64;64
+		phosphor-siren-fill;33;0;640;64;64
+		phosphor-siren-light;33;64;640;64;64
+		phosphor-siren-thin;33;128;640;64;64
+		phosphor-siren;33;192;640;64;64
+		phosphor-sketch-logo-bold;33;256;640;64;64
+		phosphor-sketch-logo-duotone;33;320;640;64;64
+		phosphor-sketch-logo-fill;33;384;640;64;64
+		phosphor-sketch-logo-light;33;448;640;64;64
+		phosphor-sketch-logo-thin;33;512;640;64;64
+		phosphor-sketch-logo;33;576;640;64;64
+		phosphor-skip-back-bold;33;640;640;64;64
+		phosphor-skip-back-circle-bold;33;704;640;64;64
+		phosphor-skip-back-circle-duotone;33;768;640;64;64
+		phosphor-skip-back-circle-fill;33;832;640;64;64
+		phosphor-skip-back-circle-light;33;896;640;64;64
+		phosphor-skip-back-circle-thin;33;960;640;64;64
+		phosphor-skip-back-circle;33;0;704;64;64
+		phosphor-skip-back-duotone;33;64;704;64;64
+		phosphor-skip-back-fill;33;128;704;64;64
+		phosphor-skip-back-light;33;192;704;64;64
+		phosphor-skip-back-thin;33;256;704;64;64
+		phosphor-skip-back;33;320;704;64;64
+		phosphor-skip-forward-bold;33;384;704;64;64
+		phosphor-skip-forward-circle-bold;33;448;704;64;64
+		phosphor-skip-forward-circle-duotone;33;512;704;64;64
+		phosphor-skip-forward-circle-fill;33;576;704;64;64
+		phosphor-skip-forward-circle-light;33;640;704;64;64
+		phosphor-skip-forward-circle-thin;33;704;704;64;64
+		phosphor-skip-forward-circle;33;768;704;64;64
+		phosphor-skip-forward-duotone;33;832;704;64;64
+		phosphor-skip-forward-fill;33;896;704;64;64
+		phosphor-skip-forward-light;33;960;704;64;64
+		phosphor-skip-forward-thin;33;0;768;64;64
+		phosphor-skip-forward;33;64;768;64;64
+		phosphor-skull-bold;33;128;768;64;64
+		phosphor-skull-duotone;33;192;768;64;64
+		phosphor-skull-fill;33;256;768;64;64
+		phosphor-skull-light;33;320;768;64;64
+		phosphor-skull-thin;33;384;768;64;64
+		phosphor-skull;33;448;768;64;64
+		phosphor-skype-logo-bold;33;512;768;64;64
+		phosphor-skype-logo-duotone;33;576;768;64;64
+		phosphor-skype-logo-fill;33;640;768;64;64
+		phosphor-skype-logo-light;33;704;768;64;64
+		phosphor-skype-logo-thin;33;768;768;64;64
+		phosphor-skype-logo;33;832;768;64;64
+		phosphor-slack-logo-bold;33;896;768;64;64
+		phosphor-slack-logo-duotone;33;960;768;64;64
+		phosphor-slack-logo-fill;33;0;832;64;64
+		phosphor-slack-logo-light;33;64;832;64;64
+		phosphor-slack-logo-thin;33;128;832;64;64
+		phosphor-slack-logo;33;192;832;64;64
+		phosphor-sliders-bold;33;256;832;64;64
+		phosphor-sliders-duotone;33;320;832;64;64
+		phosphor-sliders-fill;33;384;832;64;64
+		phosphor-sliders-horizontal-bold;33;448;832;64;64
+		phosphor-sliders-horizontal-duotone;33;512;832;64;64
+		phosphor-sliders-horizontal-fill;33;576;832;64;64
+		phosphor-sliders-horizontal-light;33;640;832;64;64
+		phosphor-sliders-horizontal-thin;33;704;832;64;64
+		phosphor-sliders-horizontal;33;768;832;64;64
+		phosphor-sliders-light;33;832;832;64;64
+		phosphor-sliders-thin;33;896;832;64;64
+		phosphor-sliders;33;960;832;64;64
+		phosphor-slideshow-bold;33;0;896;64;64
+		phosphor-slideshow-duotone;33;64;896;64;64
+		phosphor-slideshow-fill;33;128;896;64;64
+		phosphor-slideshow-light;33;192;896;64;64
+		phosphor-slideshow-thin;33;256;896;64;64
+		phosphor-slideshow;33;320;896;64;64
+		phosphor-smiley-angry-bold;33;384;896;64;64
+		phosphor-smiley-angry-duotone;33;448;896;64;64
+		phosphor-smiley-angry-fill;33;512;896;64;64
+		phosphor-smiley-angry-light;33;576;896;64;64
+		phosphor-smiley-angry-thin;33;640;896;64;64
+		phosphor-smiley-angry;33;704;896;64;64
+		phosphor-smiley-blank-bold;33;768;896;64;64
+		phosphor-smiley-blank-duotone;33;832;896;64;64
+		phosphor-smiley-blank-fill;33;896;896;64;64
+		phosphor-smiley-blank-light;33;960;896;64;64
+		phosphor-smiley-blank-thin;33;0;960;64;64
+		phosphor-smiley-blank;33;64;960;64;64
+		phosphor-smiley-bold;33;128;960;64;64
+		phosphor-smiley-duotone;33;192;960;64;64
+		phosphor-smiley-fill;33;256;960;64;64
+		phosphor-smiley-light;33;320;960;64;64
+		phosphor-smiley-meh-bold;33;384;960;64;64
+		phosphor-smiley-meh-duotone;33;448;960;64;64
+		phosphor-smiley-meh-fill;33;512;960;64;64
+		phosphor-smiley-meh-light;33;576;960;64;64
+		phosphor-smiley-meh-thin;33;640;960;64;64
+		phosphor-smiley-meh;33;704;960;64;64
+		phosphor-smiley-melting-bold;33;768;960;64;64
+		phosphor-smiley-melting-duotone;33;832;960;64;64
+		phosphor-smiley-melting-fill;33;896;960;64;64
+		phosphor-smiley-melting-light;33;960;960;64;64
+		phosphor-smiley-melting-thin;34;0;0;64;64
+		phosphor-smiley-melting;34;64;0;64;64
+		phosphor-smiley-nervous-bold;34;128;0;64;64
+		phosphor-smiley-nervous-duotone;34;192;0;64;64
+		phosphor-smiley-nervous-fill;34;256;0;64;64
+		phosphor-smiley-nervous-light;34;320;0;64;64
+		phosphor-smiley-nervous-thin;34;384;0;64;64
+		phosphor-smiley-nervous;34;448;0;64;64
+		phosphor-smiley-sad-bold;34;512;0;64;64
+		phosphor-smiley-sad-duotone;34;576;0;64;64
+		phosphor-smiley-sad-fill;34;640;0;64;64
+		phosphor-smiley-sad-light;34;704;0;64;64
+		phosphor-smiley-sad-thin;34;768;0;64;64
+		phosphor-smiley-sad;34;832;0;64;64
+		phosphor-smiley-sticker-bold;34;896;0;64;64
+		phosphor-smiley-sticker-duotone;34;960;0;64;64
+		phosphor-smiley-sticker-fill;34;0;64;64;64
+		phosphor-smiley-sticker-light;34;64;64;64;64
+		phosphor-smiley-sticker-thin;34;128;64;64;64
+		phosphor-smiley-sticker;34;192;64;64;64
+		phosphor-smiley-thin;34;256;64;64;64
+		phosphor-smiley-wink-bold;34;320;64;64;64
+		phosphor-smiley-wink-duotone;34;384;64;64;64
+		phosphor-smiley-wink-fill;34;448;64;64;64
+		phosphor-smiley-wink-light;34;512;64;64;64
+		phosphor-smiley-wink-thin;34;576;64;64;64
+		phosphor-smiley-wink;34;640;64;64;64
+		phosphor-smiley-x-eyes-bold;34;704;64;64;64
+		phosphor-smiley-x-eyes-duotone;34;768;64;64;64
+		phosphor-smiley-x-eyes-fill;34;832;64;64;64
+		phosphor-smiley-x-eyes-light;34;896;64;64;64
+		phosphor-smiley-x-eyes-thin;34;960;64;64;64
+		phosphor-smiley-x-eyes;34;0;128;64;64
+		phosphor-smiley;34;64;128;64;64
+		phosphor-snapchat-logo-bold;34;128;128;64;64
+		phosphor-snapchat-logo-duotone;34;192;128;64;64
+		phosphor-snapchat-logo-fill;34;256;128;64;64
+		phosphor-snapchat-logo-light;34;320;128;64;64
+		phosphor-snapchat-logo-thin;34;384;128;64;64
+		phosphor-snapchat-logo;34;448;128;64;64
+		phosphor-sneaker-bold;34;512;128;64;64
+		phosphor-sneaker-duotone;34;576;128;64;64
+		phosphor-sneaker-fill;34;640;128;64;64
+		phosphor-sneaker-light;34;704;128;64;64
+		phosphor-sneaker-move-bold;34;768;128;64;64
+		phosphor-sneaker-move-duotone;34;832;128;64;64
+		phosphor-sneaker-move-fill;34;896;128;64;64
+		phosphor-sneaker-move-light;34;960;128;64;64
+		phosphor-sneaker-move-thin;34;0;192;64;64
+		phosphor-sneaker-move;34;64;192;64;64
+		phosphor-sneaker-thin;34;128;192;64;64
+		phosphor-sneaker;34;192;192;64;64
+		phosphor-snowflake-bold;34;256;192;64;64
+		phosphor-snowflake-duotone;34;320;192;64;64
+		phosphor-snowflake-fill;34;384;192;64;64
+		phosphor-snowflake-light;34;448;192;64;64
+		phosphor-snowflake-thin;34;512;192;64;64
+		phosphor-snowflake;34;576;192;64;64
+		phosphor-soccer-ball-bold;34;640;192;64;64
+		phosphor-soccer-ball-duotone;34;704;192;64;64
+		phosphor-soccer-ball-fill;34;768;192;64;64
+		phosphor-soccer-ball-light;34;832;192;64;64
+		phosphor-soccer-ball-thin;34;896;192;64;64
+		phosphor-soccer-ball;34;960;192;64;64
+		phosphor-sock-bold;34;0;256;64;64
+		phosphor-sock-duotone;34;64;256;64;64
+		phosphor-sock-fill;34;128;256;64;64
+		phosphor-sock-light;34;192;256;64;64
+		phosphor-sock-thin;34;256;256;64;64
+		phosphor-sock;34;320;256;64;64
+		phosphor-solar-panel-bold;34;384;256;64;64
+		phosphor-solar-panel-duotone;34;448;256;64;64
+		phosphor-solar-panel-fill;34;512;256;64;64
+		phosphor-solar-panel-light;34;576;256;64;64
+		phosphor-solar-panel-thin;34;640;256;64;64
+		phosphor-solar-panel;34;704;256;64;64
+		phosphor-solar-roof-bold;34;768;256;64;64
+		phosphor-solar-roof-duotone;34;832;256;64;64
+		phosphor-solar-roof-fill;34;896;256;64;64
+		phosphor-solar-roof-light;34;960;256;64;64
+		phosphor-solar-roof-thin;34;0;320;64;64
+		phosphor-solar-roof;34;64;320;64;64
+		phosphor-sort-ascending-bold;34;128;320;64;64
+		phosphor-sort-ascending-duotone;34;192;320;64;64
+		phosphor-sort-ascending-fill;34;256;320;64;64
+		phosphor-sort-ascending-light;34;320;320;64;64
+		phosphor-sort-ascending-thin;34;384;320;64;64
+		phosphor-sort-ascending;34;448;320;64;64
+		phosphor-sort-descending-bold;34;512;320;64;64
+		phosphor-sort-descending-duotone;34;576;320;64;64
+		phosphor-sort-descending-fill;34;640;320;64;64
+		phosphor-sort-descending-light;34;704;320;64;64
+		phosphor-sort-descending-thin;34;768;320;64;64
+		phosphor-sort-descending;34;832;320;64;64
+		phosphor-soundcloud-logo-bold;34;896;320;64;64
+		phosphor-soundcloud-logo-duotone;34;960;320;64;64
+		phosphor-soundcloud-logo-fill;34;0;384;64;64
+		phosphor-soundcloud-logo-light;34;64;384;64;64
+		phosphor-soundcloud-logo-thin;34;128;384;64;64
+		phosphor-soundcloud-logo;34;192;384;64;64
+		phosphor-spade-bold;34;256;384;64;64
+		phosphor-spade-duotone;34;320;384;64;64
+		phosphor-spade-fill;34;384;384;64;64
+		phosphor-spade-light;34;448;384;64;64
+		phosphor-spade-thin;34;512;384;64;64
+		phosphor-spade;34;576;384;64;64
+		phosphor-sparkle-bold;34;640;384;64;64
+		phosphor-sparkle-duotone;34;704;384;64;64
+		phosphor-sparkle-fill;34;768;384;64;64
+		phosphor-sparkle-light;34;832;384;64;64
+		phosphor-sparkle-thin;34;896;384;64;64
+		phosphor-sparkle;34;960;384;64;64
+		phosphor-speaker-hifi-bold;34;0;448;64;64
+		phosphor-speaker-hifi-duotone;34;64;448;64;64
+		phosphor-speaker-hifi-fill;34;128;448;64;64
+		phosphor-speaker-hifi-light;34;192;448;64;64
+		phosphor-speaker-hifi-thin;34;256;448;64;64
+		phosphor-speaker-hifi;34;320;448;64;64
+		phosphor-speaker-high-bold;34;384;448;64;64
+		phosphor-speaker-high-duotone;34;448;448;64;64
+		phosphor-speaker-high-fill;34;512;448;64;64
+		phosphor-speaker-high-light;34;576;448;64;64
+		phosphor-speaker-high-thin;34;640;448;64;64
+		phosphor-speaker-high;34;704;448;64;64
+		phosphor-speaker-low-bold;34;768;448;64;64
+		phosphor-speaker-low-duotone;34;832;448;64;64
+		phosphor-speaker-low-fill;34;896;448;64;64
+		phosphor-speaker-low-light;34;960;448;64;64
+		phosphor-speaker-low-thin;34;0;512;64;64
+		phosphor-speaker-low;34;64;512;64;64
+		phosphor-speaker-none-bold;34;128;512;64;64
+		phosphor-speaker-none-duotone;34;192;512;64;64
+		phosphor-speaker-none-fill;34;256;512;64;64
+		phosphor-speaker-none-light;34;320;512;64;64
+		phosphor-speaker-none-thin;34;384;512;64;64
+		phosphor-speaker-none;34;448;512;64;64
+		phosphor-speaker-simple-high-bold;34;512;512;64;64
+		phosphor-speaker-simple-high-duotone;34;576;512;64;64
+		phosphor-speaker-simple-high-fill;34;640;512;64;64
+		phosphor-speaker-simple-high-light;34;704;512;64;64
+		phosphor-speaker-simple-high-thin;34;768;512;64;64
+		phosphor-speaker-simple-high;34;832;512;64;64
+		phosphor-speaker-simple-low-bold;34;896;512;64;64
+		phosphor-speaker-simple-low-duotone;34;960;512;64;64
+		phosphor-speaker-simple-low-fill;34;0;576;64;64
+		phosphor-speaker-simple-low-light;34;64;576;64;64
+		phosphor-speaker-simple-low-thin;34;128;576;64;64
+		phosphor-speaker-simple-low;34;192;576;64;64
+		phosphor-speaker-simple-none-bold;34;256;576;64;64
+		phosphor-speaker-simple-none-duotone;34;320;576;64;64
+		phosphor-speaker-simple-none-fill;34;384;576;64;64
+		phosphor-speaker-simple-none-light;34;448;576;64;64
+		phosphor-speaker-simple-none-thin;34;512;576;64;64
+		phosphor-speaker-simple-none;34;576;576;64;64
+		phosphor-speaker-simple-slash-bold;34;640;576;64;64
+		phosphor-speaker-simple-slash-duotone;34;704;576;64;64
+		phosphor-speaker-simple-slash-fill;34;768;576;64;64
+		phosphor-speaker-simple-slash-light;34;832;576;64;64
+		phosphor-speaker-simple-slash-thin;34;896;576;64;64
+		phosphor-speaker-simple-slash;34;960;576;64;64
+		phosphor-speaker-simple-x-bold;34;0;640;64;64
+		phosphor-speaker-simple-x-duotone;34;64;640;64;64
+		phosphor-speaker-simple-x-fill;34;128;640;64;64
+		phosphor-speaker-simple-x-light;34;192;640;64;64
+		phosphor-speaker-simple-x-thin;34;256;640;64;64
+		phosphor-speaker-simple-x;34;320;640;64;64
+		phosphor-speaker-slash-bold;34;384;640;64;64
+		phosphor-speaker-slash-duotone;34;448;640;64;64
+		phosphor-speaker-slash-fill;34;512;640;64;64
+		phosphor-speaker-slash-light;34;576;640;64;64
+		phosphor-speaker-slash-thin;34;640;640;64;64
+		phosphor-speaker-slash;34;704;640;64;64
+		phosphor-speaker-x-bold;34;768;640;64;64
+		phosphor-speaker-x-duotone;34;832;640;64;64
+		phosphor-speaker-x-fill;34;896;640;64;64
+		phosphor-speaker-x-light;34;960;640;64;64
+		phosphor-speaker-x-thin;34;0;704;64;64
+		phosphor-speaker-x;34;64;704;64;64
+		phosphor-speedometer-bold;34;128;704;64;64
+		phosphor-speedometer-duotone;34;192;704;64;64
+		phosphor-speedometer-fill;34;256;704;64;64
+		phosphor-speedometer-light;34;320;704;64;64
+		phosphor-speedometer-thin;34;384;704;64;64
+		phosphor-speedometer;34;448;704;64;64
+		phosphor-sphere-bold;34;512;704;64;64
+		phosphor-sphere-duotone;34;576;704;64;64
+		phosphor-sphere-fill;34;640;704;64;64
+		phosphor-sphere-light;34;704;704;64;64
+		phosphor-sphere-thin;34;768;704;64;64
+		phosphor-sphere;34;832;704;64;64
+		phosphor-spinner-ball-bold;34;896;704;64;64
+		phosphor-spinner-ball-duotone;34;960;704;64;64
+		phosphor-spinner-ball-fill;34;0;768;64;64
+		phosphor-spinner-ball-light;34;64;768;64;64
+		phosphor-spinner-ball-thin;34;128;768;64;64
+		phosphor-spinner-ball;34;192;768;64;64
+		phosphor-spinner-bold;34;256;768;64;64
+		phosphor-spinner-duotone;34;320;768;64;64
+		phosphor-spinner-fill;34;384;768;64;64
+		phosphor-spinner-gap-bold;34;448;768;64;64
+		phosphor-spinner-gap-duotone;34;512;768;64;64
+		phosphor-spinner-gap-fill;34;576;768;64;64
+		phosphor-spinner-gap-light;34;640;768;64;64
+		phosphor-spinner-gap-thin;34;704;768;64;64
+		phosphor-spinner-gap;34;768;768;64;64
+		phosphor-spinner-light;34;832;768;64;64
+		phosphor-spinner-thin;34;896;768;64;64
+		phosphor-spinner;34;960;768;64;64
+		phosphor-spiral-bold;34;0;832;64;64
+		phosphor-spiral-duotone;34;64;832;64;64
+		phosphor-spiral-fill;34;128;832;64;64
+		phosphor-spiral-light;34;192;832;64;64
+		phosphor-spiral-thin;34;256;832;64;64
+		phosphor-spiral;34;320;832;64;64
+		phosphor-split-horizontal-bold;34;384;832;64;64
+		phosphor-split-horizontal-duotone;34;448;832;64;64
+		phosphor-split-horizontal-fill;34;512;832;64;64
+		phosphor-split-horizontal-light;34;576;832;64;64
+		phosphor-split-horizontal-thin;34;640;832;64;64
+		phosphor-split-horizontal;34;704;832;64;64
+		phosphor-split-vertical-bold;34;768;832;64;64
+		phosphor-split-vertical-duotone;34;832;832;64;64
+		phosphor-split-vertical-fill;34;896;832;64;64
+		phosphor-split-vertical-light;34;960;832;64;64
+		phosphor-split-vertical-thin;34;0;896;64;64
+		phosphor-split-vertical;34;64;896;64;64
+		phosphor-spotify-logo-bold;34;128;896;64;64
+		phosphor-spotify-logo-duotone;34;192;896;64;64
+		phosphor-spotify-logo-fill;34;256;896;64;64
+		phosphor-spotify-logo-light;34;320;896;64;64
+		phosphor-spotify-logo-thin;34;384;896;64;64
+		phosphor-spotify-logo;34;448;896;64;64
+		phosphor-spray-bottle-bold;34;512;896;64;64
+		phosphor-spray-bottle-duotone;34;576;896;64;64
+		phosphor-spray-bottle-fill;34;640;896;64;64
+		phosphor-spray-bottle-light;34;704;896;64;64
+		phosphor-spray-bottle-thin;34;768;896;64;64
+		phosphor-spray-bottle;34;832;896;64;64
+		phosphor-square-bold;34;896;896;64;64
+		phosphor-square-duotone;34;960;896;64;64
+		phosphor-square-fill;34;0;960;64;64
+		phosphor-square-half-bold;34;64;960;64;64
+		phosphor-square-half-bottom-bold;34;128;960;64;64
+		phosphor-square-half-bottom-duotone;34;192;960;64;64
+		phosphor-square-half-bottom-fill;34;256;960;64;64
+		phosphor-square-half-bottom-light;34;320;960;64;64
+		phosphor-square-half-bottom-thin;34;384;960;64;64
+		phosphor-square-half-bottom;34;448;960;64;64
+		phosphor-square-half-duotone;34;512;960;64;64
+		phosphor-square-half-fill;34;576;960;64;64
+		phosphor-square-half-light;34;640;960;64;64
+		phosphor-square-half-thin;34;704;960;64;64
+		phosphor-square-half;34;768;960;64;64
+		phosphor-square-light;34;832;960;64;64
+		phosphor-square-logo-bold;34;896;960;64;64
+		phosphor-square-logo-duotone;34;960;960;64;64
+		phosphor-square-logo-fill;35;0;0;64;64
+		phosphor-square-logo-light;35;64;0;64;64
+		phosphor-square-logo-thin;35;128;0;64;64
+		phosphor-square-logo;35;192;0;64;64
+		phosphor-square-split-horizontal-bold;35;256;0;64;64
+		phosphor-square-split-horizontal-duotone;35;320;0;64;64
+		phosphor-square-split-horizontal-fill;35;384;0;64;64
+		phosphor-square-split-horizontal-light;35;448;0;64;64
+		phosphor-square-split-horizontal-thin;35;512;0;64;64
+		phosphor-square-split-horizontal;35;576;0;64;64
+		phosphor-square-split-vertical-bold;35;640;0;64;64
+		phosphor-square-split-vertical-duotone;35;704;0;64;64
+		phosphor-square-split-vertical-fill;35;768;0;64;64
+		phosphor-square-split-vertical-light;35;832;0;64;64
+		phosphor-square-split-vertical-thin;35;896;0;64;64
+		phosphor-square-split-vertical;35;960;0;64;64
+		phosphor-square-thin;35;0;64;64;64
+		phosphor-square;35;64;64;64;64
+		phosphor-squares-four-bold;35;128;64;64;64
+		phosphor-squares-four-duotone;35;192;64;64;64
+		phosphor-squares-four-fill;35;256;64;64;64
+		phosphor-squares-four-light;35;320;64;64;64
+		phosphor-squares-four-thin;35;384;64;64;64
+		phosphor-squares-four;35;448;64;64;64
+		phosphor-stack-bold;35;512;64;64;64
+		phosphor-stack-duotone;35;576;64;64;64
+		phosphor-stack-fill;35;640;64;64;64
+		phosphor-stack-light;35;704;64;64;64
+		phosphor-stack-minus-bold;35;768;64;64;64
+		phosphor-stack-minus-duotone;35;832;64;64;64
+		phosphor-stack-minus-fill;35;896;64;64;64
+		phosphor-stack-minus-light;35;960;64;64;64
+		phosphor-stack-minus-thin;35;0;128;64;64
+		phosphor-stack-minus;35;64;128;64;64
+		phosphor-stack-overflow-logo-bold;35;128;128;64;64
+		phosphor-stack-overflow-logo-duotone;35;192;128;64;64
+		phosphor-stack-overflow-logo-fill;35;256;128;64;64
+		phosphor-stack-overflow-logo-light;35;320;128;64;64
+		phosphor-stack-overflow-logo-thin;35;384;128;64;64
+		phosphor-stack-overflow-logo;35;448;128;64;64
+		phosphor-stack-plus-bold;35;512;128;64;64
+		phosphor-stack-plus-duotone;35;576;128;64;64
+		phosphor-stack-plus-fill;35;640;128;64;64
+		phosphor-stack-plus-light;35;704;128;64;64
+		phosphor-stack-plus-thin;35;768;128;64;64
+		phosphor-stack-plus;35;832;128;64;64
+		phosphor-stack-simple-bold;35;896;128;64;64
+		phosphor-stack-simple-duotone;35;960;128;64;64
+		phosphor-stack-simple-fill;35;0;192;64;64
+		phosphor-stack-simple-light;35;64;192;64;64
+		phosphor-stack-simple-thin;35;128;192;64;64
+		phosphor-stack-simple;35;192;192;64;64
+		phosphor-stack-thin;35;256;192;64;64
+		phosphor-stack;35;320;192;64;64
+		phosphor-stairs-bold;35;384;192;64;64
+		phosphor-stairs-duotone;35;448;192;64;64
+		phosphor-stairs-fill;35;512;192;64;64
+		phosphor-stairs-light;35;576;192;64;64
+		phosphor-stairs-thin;35;640;192;64;64
+		phosphor-stairs;35;704;192;64;64
+		phosphor-stamp-bold;35;768;192;64;64
+		phosphor-stamp-duotone;35;832;192;64;64
+		phosphor-stamp-fill;35;896;192;64;64
+		phosphor-stamp-light;35;960;192;64;64
+		phosphor-stamp-thin;35;0;256;64;64
+		phosphor-stamp;35;64;256;64;64
+		phosphor-standard-definition-bold;35;128;256;64;64
+		phosphor-standard-definition-duotone;35;192;256;64;64
+		phosphor-standard-definition-fill;35;256;256;64;64
+		phosphor-standard-definition-light;35;320;256;64;64
+		phosphor-standard-definition-thin;35;384;256;64;64
+		phosphor-standard-definition;35;448;256;64;64
+		phosphor-star-and-crescent-bold;35;512;256;64;64
+		phosphor-star-and-crescent-duotone;35;576;256;64;64
+		phosphor-star-and-crescent-fill;35;640;256;64;64
+		phosphor-star-and-crescent-light;35;704;256;64;64
+		phosphor-star-and-crescent-thin;35;768;256;64;64
+		phosphor-star-and-crescent;35;832;256;64;64
+		phosphor-star-bold;35;896;256;64;64
+		phosphor-star-duotone;35;960;256;64;64
+		phosphor-star-fill;35;0;320;64;64
+		phosphor-star-four-bold;35;64;320;64;64
+		phosphor-star-four-duotone;35;128;320;64;64
+		phosphor-star-four-fill;35;192;320;64;64
+		phosphor-star-four-light;35;256;320;64;64
+		phosphor-star-four-thin;35;320;320;64;64
+		phosphor-star-four;35;384;320;64;64
+		phosphor-star-half-bold;35;448;320;64;64
+		phosphor-star-half-duotone;35;512;320;64;64
+		phosphor-star-half-fill;35;576;320;64;64
+		phosphor-star-half-light;35;640;320;64;64
+		phosphor-star-half-thin;35;704;320;64;64
+		phosphor-star-half;35;768;320;64;64
+		phosphor-star-light;35;832;320;64;64
+		phosphor-star-of-david-bold;35;896;320;64;64
+		phosphor-star-of-david-duotone;35;960;320;64;64
+		phosphor-star-of-david-fill;35;0;384;64;64
+		phosphor-star-of-david-light;35;64;384;64;64
+		phosphor-star-of-david-thin;35;128;384;64;64
+		phosphor-star-of-david;35;192;384;64;64
+		phosphor-star-thin;35;256;384;64;64
+		phosphor-star;35;320;384;64;64
+		phosphor-steam-logo-bold;35;384;384;64;64
+		phosphor-steam-logo-duotone;35;448;384;64;64
+		phosphor-steam-logo-fill;35;512;384;64;64
+		phosphor-steam-logo-light;35;576;384;64;64
+		phosphor-steam-logo-thin;35;640;384;64;64
+		phosphor-steam-logo;35;704;384;64;64
+		phosphor-steering-wheel-bold;35;768;384;64;64
+		phosphor-steering-wheel-duotone;35;832;384;64;64
+		phosphor-steering-wheel-fill;35;896;384;64;64
+		phosphor-steering-wheel-light;35;960;384;64;64
+		phosphor-steering-wheel-thin;35;0;448;64;64
+		phosphor-steering-wheel;35;64;448;64;64
+		phosphor-steps-bold;35;128;448;64;64
+		phosphor-steps-duotone;35;192;448;64;64
+		phosphor-steps-fill;35;256;448;64;64
+		phosphor-steps-light;35;320;448;64;64
+		phosphor-steps-thin;35;384;448;64;64
+		phosphor-steps;35;448;448;64;64
+		phosphor-stethoscope-bold;35;512;448;64;64
+		phosphor-stethoscope-duotone;35;576;448;64;64
+		phosphor-stethoscope-fill;35;640;448;64;64
+		phosphor-stethoscope-light;35;704;448;64;64
+		phosphor-stethoscope-thin;35;768;448;64;64
+		phosphor-stethoscope;35;832;448;64;64
+		phosphor-sticker-bold;35;896;448;64;64
+		phosphor-sticker-duotone;35;960;448;64;64
+		phosphor-sticker-fill;35;0;512;64;64
+		phosphor-sticker-light;35;64;512;64;64
+		phosphor-sticker-thin;35;128;512;64;64
+		phosphor-sticker;35;192;512;64;64
+		phosphor-stool-bold;35;256;512;64;64
+		phosphor-stool-duotone;35;320;512;64;64
+		phosphor-stool-fill;35;384;512;64;64
+		phosphor-stool-light;35;448;512;64;64
+		phosphor-stool-thin;35;512;512;64;64
+		phosphor-stool;35;576;512;64;64
+		phosphor-stop-bold;35;640;512;64;64
+		phosphor-stop-circle-bold;35;704;512;64;64
+		phosphor-stop-circle-duotone;35;768;512;64;64
+		phosphor-stop-circle-fill;35;832;512;64;64
+		phosphor-stop-circle-light;35;896;512;64;64
+		phosphor-stop-circle-thin;35;960;512;64;64
+		phosphor-stop-circle;35;0;576;64;64
+		phosphor-stop-duotone;35;64;576;64;64
+		phosphor-stop-fill;35;128;576;64;64
+		phosphor-stop-light;35;192;576;64;64
+		phosphor-stop-thin;35;256;576;64;64
+		phosphor-stop;35;320;576;64;64
+		phosphor-storefront-bold;35;384;576;64;64
+		phosphor-storefront-duotone;35;448;576;64;64
+		phosphor-storefront-fill;35;512;576;64;64
+		phosphor-storefront-light;35;576;576;64;64
+		phosphor-storefront-thin;35;640;576;64;64
+		phosphor-storefront;35;704;576;64;64
+		phosphor-strategy-bold;35;768;576;64;64
+		phosphor-strategy-duotone;35;832;576;64;64
+		phosphor-strategy-fill;35;896;576;64;64
+		phosphor-strategy-light;35;960;576;64;64
+		phosphor-strategy-thin;35;0;640;64;64
+		phosphor-strategy;35;64;640;64;64
+		phosphor-stripe-logo-bold;35;128;640;64;64
+		phosphor-stripe-logo-duotone;35;192;640;64;64
+		phosphor-stripe-logo-fill;35;256;640;64;64
+		phosphor-stripe-logo-light;35;320;640;64;64
+		phosphor-stripe-logo-thin;35;384;640;64;64
+		phosphor-stripe-logo;35;448;640;64;64
+		phosphor-student-bold;35;512;640;64;64
+		phosphor-student-duotone;35;576;640;64;64
+		phosphor-student-fill;35;640;640;64;64
+		phosphor-student-light;35;704;640;64;64
+		phosphor-student-thin;35;768;640;64;64
+		phosphor-student;35;832;640;64;64
+		phosphor-subset-of-bold;35;896;640;64;64
+		phosphor-subset-of-duotone;35;960;640;64;64
+		phosphor-subset-of-fill;35;0;704;64;64
+		phosphor-subset-of-light;35;64;704;64;64
+		phosphor-subset-of-thin;35;128;704;64;64
+		phosphor-subset-of;35;192;704;64;64
+		phosphor-subset-proper-of-bold;35;256;704;64;64
+		phosphor-subset-proper-of-duotone;35;320;704;64;64
+		phosphor-subset-proper-of-fill;35;384;704;64;64
+		phosphor-subset-proper-of-light;35;448;704;64;64
+		phosphor-subset-proper-of-thin;35;512;704;64;64
+		phosphor-subset-proper-of;35;576;704;64;64
+		phosphor-subtitles-bold;35;640;704;64;64
+		phosphor-subtitles-duotone;35;704;704;64;64
+		phosphor-subtitles-fill;35;768;704;64;64
+		phosphor-subtitles-light;35;832;704;64;64
+		phosphor-subtitles-slash-bold;35;896;704;64;64
+		phosphor-subtitles-slash-duotone;35;960;704;64;64
+		phosphor-subtitles-slash-fill;35;0;768;64;64
+		phosphor-subtitles-slash-light;35;64;768;64;64
+		phosphor-subtitles-slash-thin;35;128;768;64;64
+		phosphor-subtitles-slash;35;192;768;64;64
+		phosphor-subtitles-thin;35;256;768;64;64
+		phosphor-subtitles;35;320;768;64;64
+		phosphor-subtract-bold;35;384;768;64;64
+		phosphor-subtract-duotone;35;448;768;64;64
+		phosphor-subtract-fill;35;512;768;64;64
+		phosphor-subtract-light;35;576;768;64;64
+		phosphor-subtract-square-bold;35;640;768;64;64
+		phosphor-subtract-square-duotone;35;704;768;64;64
+		phosphor-subtract-square-fill;35;768;768;64;64
+		phosphor-subtract-square-light;35;832;768;64;64
+		phosphor-subtract-square-thin;35;896;768;64;64
+		phosphor-subtract-square;35;960;768;64;64
+		phosphor-subtract-thin;35;0;832;64;64
+		phosphor-subtract;35;64;832;64;64
+		phosphor-subway-bold;35;128;832;64;64
+		phosphor-subway-duotone;35;192;832;64;64
+		phosphor-subway-fill;35;256;832;64;64
+		phosphor-subway-light;35;320;832;64;64
+		phosphor-subway-thin;35;384;832;64;64
+		phosphor-subway;35;448;832;64;64
+		phosphor-suitcase-bold;35;512;832;64;64
+		phosphor-suitcase-duotone;35;576;832;64;64
+		phosphor-suitcase-fill;35;640;832;64;64
+		phosphor-suitcase-light;35;704;832;64;64
+		phosphor-suitcase-rolling-bold;35;768;832;64;64
+		phosphor-suitcase-rolling-duotone;35;832;832;64;64
+		phosphor-suitcase-rolling-fill;35;896;832;64;64
+		phosphor-suitcase-rolling-light;35;960;832;64;64
+		phosphor-suitcase-rolling-thin;35;0;896;64;64
+		phosphor-suitcase-rolling;35;64;896;64;64
+		phosphor-suitcase-simple-bold;35;128;896;64;64
+		phosphor-suitcase-simple-duotone;35;192;896;64;64
+		phosphor-suitcase-simple-fill;35;256;896;64;64
+		phosphor-suitcase-simple-light;35;320;896;64;64
+		phosphor-suitcase-simple-thin;35;384;896;64;64
+		phosphor-suitcase-simple;35;448;896;64;64
+		phosphor-suitcase-thin;35;512;896;64;64
+		phosphor-suitcase;35;576;896;64;64
+		phosphor-sun-bold;35;640;896;64;64
+		phosphor-sun-dim-bold;35;704;896;64;64
+		phosphor-sun-dim-duotone;35;768;896;64;64
+		phosphor-sun-dim-fill;35;832;896;64;64
+		phosphor-sun-dim-light;35;896;896;64;64
+		phosphor-sun-dim-thin;35;960;896;64;64
+		phosphor-sun-dim;35;0;960;64;64
+		phosphor-sun-duotone;35;64;960;64;64
+		phosphor-sun-fill;35;128;960;64;64
+		phosphor-sun-horizon-bold;35;192;960;64;64
+		phosphor-sun-horizon-duotone;35;256;960;64;64
+		phosphor-sun-horizon-fill;35;320;960;64;64
+		phosphor-sun-horizon-light;35;384;960;64;64
+		phosphor-sun-horizon-thin;35;448;960;64;64
+		phosphor-sun-horizon;35;512;960;64;64
+		phosphor-sun-light;35;576;960;64;64
+		phosphor-sun-thin;35;640;960;64;64
+		phosphor-sun;35;704;960;64;64
+		phosphor-sunglasses-bold;35;768;960;64;64
+		phosphor-sunglasses-duotone;35;832;960;64;64
+		phosphor-sunglasses-fill;35;896;960;64;64
+		phosphor-sunglasses-light;35;960;960;64;64
+		phosphor-sunglasses-thin;36;0;0;64;64
+		phosphor-sunglasses;36;64;0;64;64
+		phosphor-superset-of-bold;36;128;0;64;64
+		phosphor-superset-of-duotone;36;192;0;64;64
+		phosphor-superset-of-fill;36;256;0;64;64
+		phosphor-superset-of-light;36;320;0;64;64
+		phosphor-superset-of-thin;36;384;0;64;64
+		phosphor-superset-of;36;448;0;64;64
+		phosphor-superset-proper-of-bold;36;512;0;64;64
+		phosphor-superset-proper-of-duotone;36;576;0;64;64
+		phosphor-superset-proper-of-fill;36;640;0;64;64
+		phosphor-superset-proper-of-light;36;704;0;64;64
+		phosphor-superset-proper-of-thin;36;768;0;64;64
+		phosphor-superset-proper-of;36;832;0;64;64
+		phosphor-swap-bold;36;896;0;64;64
+		phosphor-swap-duotone;36;960;0;64;64
+		phosphor-swap-fill;36;0;64;64;64
+		phosphor-swap-light;36;64;64;64;64
+		phosphor-swap-thin;36;128;64;64;64
+		phosphor-swap;36;192;64;64;64
+		phosphor-swatches-bold;36;256;64;64;64
+		phosphor-swatches-duotone;36;320;64;64;64
+		phosphor-swatches-fill;36;384;64;64;64
+		phosphor-swatches-light;36;448;64;64;64
+		phosphor-swatches-thin;36;512;64;64;64
+		phosphor-swatches;36;576;64;64;64
+		phosphor-swimming-pool-bold;36;640;64;64;64
+		phosphor-swimming-pool-duotone;36;704;64;64;64
+		phosphor-swimming-pool-fill;36;768;64;64;64
+		phosphor-swimming-pool-light;36;832;64;64;64
+		phosphor-swimming-pool-thin;36;896;64;64;64
+		phosphor-swimming-pool;36;960;64;64;64
+		phosphor-sword-bold;36;0;128;64;64
+		phosphor-sword-duotone;36;64;128;64;64
+		phosphor-sword-fill;36;128;128;64;64
+		phosphor-sword-light;36;192;128;64;64
+		phosphor-sword-thin;36;256;128;64;64
+		phosphor-sword;36;320;128;64;64
+		phosphor-synagogue-bold;36;384;128;64;64
+		phosphor-synagogue-duotone;36;448;128;64;64
+		phosphor-synagogue-fill;36;512;128;64;64
+		phosphor-synagogue-light;36;576;128;64;64
+		phosphor-synagogue-thin;36;640;128;64;64
+		phosphor-synagogue;36;704;128;64;64
+		phosphor-syringe-bold;36;768;128;64;64
+		phosphor-syringe-duotone;36;832;128;64;64
+		phosphor-syringe-fill;36;896;128;64;64
+		phosphor-syringe-light;36;960;128;64;64
+		phosphor-syringe-thin;36;0;192;64;64
+		phosphor-syringe;36;64;192;64;64
+		phosphor-t-shirt-bold;36;128;192;64;64
+		phosphor-t-shirt-duotone;36;192;192;64;64
+		phosphor-t-shirt-fill;36;256;192;64;64
+		phosphor-t-shirt-light;36;320;192;64;64
+		phosphor-t-shirt-thin;36;384;192;64;64
+		phosphor-t-shirt;36;448;192;64;64
+		phosphor-table-bold;36;512;192;64;64
+		phosphor-table-duotone;36;576;192;64;64
+		phosphor-table-fill;36;640;192;64;64
+		phosphor-table-light;36;704;192;64;64
+		phosphor-table-thin;36;768;192;64;64
+		phosphor-table;36;832;192;64;64
+		phosphor-tabs-bold;36;896;192;64;64
+		phosphor-tabs-duotone;36;960;192;64;64
+		phosphor-tabs-fill;36;0;256;64;64
+		phosphor-tabs-light;36;64;256;64;64
+		phosphor-tabs-thin;36;128;256;64;64
+		phosphor-tabs;36;192;256;64;64
+		phosphor-tag-bold;36;256;256;64;64
+		phosphor-tag-chevron-bold;36;320;256;64;64
+		phosphor-tag-chevron-duotone;36;384;256;64;64
+		phosphor-tag-chevron-fill;36;448;256;64;64
+		phosphor-tag-chevron-light;36;512;256;64;64
+		phosphor-tag-chevron-thin;36;576;256;64;64
+		phosphor-tag-chevron;36;640;256;64;64
+		phosphor-tag-duotone;36;704;256;64;64
+		phosphor-tag-fill;36;768;256;64;64
+		phosphor-tag-light;36;832;256;64;64
+		phosphor-tag-simple-bold;36;896;256;64;64
+		phosphor-tag-simple-duotone;36;960;256;64;64
+		phosphor-tag-simple-fill;36;0;320;64;64
+		phosphor-tag-simple-light;36;64;320;64;64
+		phosphor-tag-simple-thin;36;128;320;64;64
+		phosphor-tag-simple;36;192;320;64;64
+		phosphor-tag-thin;36;256;320;64;64
+		phosphor-tag;36;320;320;64;64
+		phosphor-target-bold;36;384;320;64;64
+		phosphor-target-duotone;36;448;320;64;64
+		phosphor-target-fill;36;512;320;64;64
+		phosphor-target-light;36;576;320;64;64
+		phosphor-target-thin;36;640;320;64;64
+		phosphor-target;36;704;320;64;64
+		phosphor-taxi-bold;36;768;320;64;64
+		phosphor-taxi-duotone;36;832;320;64;64
+		phosphor-taxi-fill;36;896;320;64;64
+		phosphor-taxi-light;36;960;320;64;64
+		phosphor-taxi-thin;36;0;384;64;64
+		phosphor-taxi;36;64;384;64;64
+		phosphor-tea-bag-bold;36;128;384;64;64
+		phosphor-tea-bag-duotone;36;192;384;64;64
+		phosphor-tea-bag-fill;36;256;384;64;64
+		phosphor-tea-bag-light;36;320;384;64;64
+		phosphor-tea-bag-thin;36;384;384;64;64
+		phosphor-tea-bag;36;448;384;64;64
+		phosphor-telegram-logo-bold;36;512;384;64;64
+		phosphor-telegram-logo-duotone;36;576;384;64;64
+		phosphor-telegram-logo-fill;36;640;384;64;64
+		phosphor-telegram-logo-light;36;704;384;64;64
+		phosphor-telegram-logo-thin;36;768;384;64;64
+		phosphor-telegram-logo;36;832;384;64;64
+		phosphor-television-bold;36;896;384;64;64
+		phosphor-television-duotone;36;960;384;64;64
+		phosphor-television-fill;36;0;448;64;64
+		phosphor-television-light;36;64;448;64;64
+		phosphor-television-simple-bold;36;128;448;64;64
+		phosphor-television-simple-duotone;36;192;448;64;64
+		phosphor-television-simple-fill;36;256;448;64;64
+		phosphor-television-simple-light;36;320;448;64;64
+		phosphor-television-simple-thin;36;384;448;64;64
+		phosphor-television-simple;36;448;448;64;64
+		phosphor-television-thin;36;512;448;64;64
+		phosphor-television;36;576;448;64;64
+		phosphor-tennis-ball-bold;36;640;448;64;64
+		phosphor-tennis-ball-duotone;36;704;448;64;64
+		phosphor-tennis-ball-fill;36;768;448;64;64
+		phosphor-tennis-ball-light;36;832;448;64;64
+		phosphor-tennis-ball-thin;36;896;448;64;64
+		phosphor-tennis-ball;36;960;448;64;64
+		phosphor-tent-bold;36;0;512;64;64
+		phosphor-tent-duotone;36;64;512;64;64
+		phosphor-tent-fill;36;128;512;64;64
+		phosphor-tent-light;36;192;512;64;64
+		phosphor-tent-thin;36;256;512;64;64
+		phosphor-tent;36;320;512;64;64
+		phosphor-terminal-bold;36;384;512;64;64
+		phosphor-terminal-duotone;36;448;512;64;64
+		phosphor-terminal-fill;36;512;512;64;64
+		phosphor-terminal-light;36;576;512;64;64
+		phosphor-terminal-thin;36;640;512;64;64
+		phosphor-terminal-window-bold;36;704;512;64;64
+		phosphor-terminal-window-duotone;36;768;512;64;64
+		phosphor-terminal-window-fill;36;832;512;64;64
+		phosphor-terminal-window-light;36;896;512;64;64
+		phosphor-terminal-window-thin;36;960;512;64;64
+		phosphor-terminal-window;36;0;576;64;64
+		phosphor-terminal;36;64;576;64;64
+		phosphor-test-tube-bold;36;128;576;64;64
+		phosphor-test-tube-duotone;36;192;576;64;64
+		phosphor-test-tube-fill;36;256;576;64;64
+		phosphor-test-tube-light;36;320;576;64;64
+		phosphor-test-tube-thin;36;384;576;64;64
+		phosphor-test-tube;36;448;576;64;64
+		phosphor-text-a-underline-bold;36;512;576;64;64
+		phosphor-text-a-underline-duotone;36;576;576;64;64
+		phosphor-text-a-underline-fill;36;640;576;64;64
+		phosphor-text-a-underline-light;36;704;576;64;64
+		phosphor-text-a-underline-thin;36;768;576;64;64
+		phosphor-text-a-underline;36;832;576;64;64
+		phosphor-text-aa-bold;36;896;576;64;64
+		phosphor-text-aa-duotone;36;960;576;64;64
+		phosphor-text-aa-fill;36;0;640;64;64
+		phosphor-text-aa-light;36;64;640;64;64
+		phosphor-text-aa-thin;36;128;640;64;64
+		phosphor-text-aa;36;192;640;64;64
+		phosphor-text-align-center-bold;36;256;640;64;64
+		phosphor-text-align-center-duotone;36;320;640;64;64
+		phosphor-text-align-center-fill;36;384;640;64;64
+		phosphor-text-align-center-light;36;448;640;64;64
+		phosphor-text-align-center-thin;36;512;640;64;64
+		phosphor-text-align-center;36;576;640;64;64
+		phosphor-text-align-justify-bold;36;640;640;64;64
+		phosphor-text-align-justify-duotone;36;704;640;64;64
+		phosphor-text-align-justify-fill;36;768;640;64;64
+		phosphor-text-align-justify-light;36;832;640;64;64
+		phosphor-text-align-justify-thin;36;896;640;64;64
+		phosphor-text-align-justify;36;960;640;64;64
+		phosphor-text-align-left-bold;36;0;704;64;64
+		phosphor-text-align-left-duotone;36;64;704;64;64
+		phosphor-text-align-left-fill;36;128;704;64;64
+		phosphor-text-align-left-light;36;192;704;64;64
+		phosphor-text-align-left-thin;36;256;704;64;64
+		phosphor-text-align-left;36;320;704;64;64
+		phosphor-text-align-right-bold;36;384;704;64;64
+		phosphor-text-align-right-duotone;36;448;704;64;64
+		phosphor-text-align-right-fill;36;512;704;64;64
+		phosphor-text-align-right-light;36;576;704;64;64
+		phosphor-text-align-right-thin;36;640;704;64;64
+		phosphor-text-align-right;36;704;704;64;64
+		phosphor-text-b-bold;36;768;704;64;64
+		phosphor-text-b-duotone;36;832;704;64;64
+		phosphor-text-b-fill;36;896;704;64;64
+		phosphor-text-b-light;36;960;704;64;64
+		phosphor-text-b-thin;36;0;768;64;64
+		phosphor-text-b;36;64;768;64;64
+		phosphor-text-columns-bold;36;128;768;64;64
+		phosphor-text-columns-duotone;36;192;768;64;64
+		phosphor-text-columns-fill;36;256;768;64;64
+		phosphor-text-columns-light;36;320;768;64;64
+		phosphor-text-columns-thin;36;384;768;64;64
+		phosphor-text-columns;36;448;768;64;64
+		phosphor-text-h-bold;36;512;768;64;64
+		phosphor-text-h-duotone;36;576;768;64;64
+		phosphor-text-h-fill;36;640;768;64;64
+		phosphor-text-h-five-bold;36;704;768;64;64
+		phosphor-text-h-five-duotone;36;768;768;64;64
+		phosphor-text-h-five-fill;36;832;768;64;64
+		phosphor-text-h-five-light;36;896;768;64;64
+		phosphor-text-h-five-thin;36;960;768;64;64
+		phosphor-text-h-five;36;0;832;64;64
+		phosphor-text-h-four-bold;36;64;832;64;64
+		phosphor-text-h-four-duotone;36;128;832;64;64
+		phosphor-text-h-four-fill;36;192;832;64;64
+		phosphor-text-h-four-light;36;256;832;64;64
+		phosphor-text-h-four-thin;36;320;832;64;64
+		phosphor-text-h-four;36;384;832;64;64
+		phosphor-text-h-light;36;448;832;64;64
+		phosphor-text-h-one-bold;36;512;832;64;64
+		phosphor-text-h-one-duotone;36;576;832;64;64
+		phosphor-text-h-one-fill;36;640;832;64;64
+		phosphor-text-h-one-light;36;704;832;64;64
+		phosphor-text-h-one-thin;36;768;832;64;64
+		phosphor-text-h-one;36;832;832;64;64
+		phosphor-text-h-six-bold;36;896;832;64;64
+		phosphor-text-h-six-duotone;36;960;832;64;64
+		phosphor-text-h-six-fill;36;0;896;64;64
+		phosphor-text-h-six-light;36;64;896;64;64
+		phosphor-text-h-six-thin;36;128;896;64;64
+		phosphor-text-h-six;36;192;896;64;64
+		phosphor-text-h-thin;36;256;896;64;64
+		phosphor-text-h-three-bold;36;320;896;64;64
+		phosphor-text-h-three-duotone;36;384;896;64;64
+		phosphor-text-h-three-fill;36;448;896;64;64
+		phosphor-text-h-three-light;36;512;896;64;64
+		phosphor-text-h-three-thin;36;576;896;64;64
+		phosphor-text-h-three;36;640;896;64;64
+		phosphor-text-h-two-bold;36;704;896;64;64
+		phosphor-text-h-two-duotone;36;768;896;64;64
+		phosphor-text-h-two-fill;36;832;896;64;64
+		phosphor-text-h-two-light;36;896;896;64;64
+		phosphor-text-h-two-thin;36;960;896;64;64
+		phosphor-text-h-two;36;0;960;64;64
+		phosphor-text-h;36;64;960;64;64
+		phosphor-text-indent-bold;36;128;960;64;64
+		phosphor-text-indent-duotone;36;192;960;64;64
+		phosphor-text-indent-fill;36;256;960;64;64
+		phosphor-text-indent-light;36;320;960;64;64
+		phosphor-text-indent-thin;36;384;960;64;64
+		phosphor-text-indent;36;448;960;64;64
+		phosphor-text-italic-bold;36;512;960;64;64
+		phosphor-text-italic-duotone;36;576;960;64;64
+		phosphor-text-italic-fill;36;640;960;64;64
+		phosphor-text-italic-light;36;704;960;64;64
+		phosphor-text-italic-thin;36;768;960;64;64
+		phosphor-text-italic;36;832;960;64;64
+		phosphor-text-outdent-bold;36;896;960;64;64
+		phosphor-text-outdent-duotone;36;960;960;64;64
+		phosphor-text-outdent-fill;37;0;0;64;64
+		phosphor-text-outdent-light;37;64;0;64;64
+		phosphor-text-outdent-thin;37;128;0;64;64
+		phosphor-text-outdent;37;192;0;64;64
+		phosphor-text-strikethrough-bold;37;256;0;64;64
+		phosphor-text-strikethrough-duotone;37;320;0;64;64
+		phosphor-text-strikethrough-fill;37;384;0;64;64
+		phosphor-text-strikethrough-light;37;448;0;64;64
+		phosphor-text-strikethrough-thin;37;512;0;64;64
+		phosphor-text-strikethrough;37;576;0;64;64
+		phosphor-text-subscript-bold;37;640;0;64;64
+		phosphor-text-subscript-duotone;37;704;0;64;64
+		phosphor-text-subscript-fill;37;768;0;64;64
+		phosphor-text-subscript-light;37;832;0;64;64
+		phosphor-text-subscript-thin;37;896;0;64;64
+		phosphor-text-subscript;37;960;0;64;64
+		phosphor-text-superscript-bold;37;0;64;64;64
+		phosphor-text-superscript-duotone;37;64;64;64;64
+		phosphor-text-superscript-fill;37;128;64;64;64
+		phosphor-text-superscript-light;37;192;64;64;64
+		phosphor-text-superscript-thin;37;256;64;64;64
+		phosphor-text-superscript;37;320;64;64;64
+		phosphor-text-t-bold;37;384;64;64;64
+		phosphor-text-t-duotone;37;448;64;64;64
+		phosphor-text-t-fill;37;512;64;64;64
+		phosphor-text-t-light;37;576;64;64;64
+		phosphor-text-t-slash-bold;37;640;64;64;64
+		phosphor-text-t-slash-duotone;37;704;64;64;64
+		phosphor-text-t-slash-fill;37;768;64;64;64
+		phosphor-text-t-slash-light;37;832;64;64;64
+		phosphor-text-t-slash-thin;37;896;64;64;64
+		phosphor-text-t-slash;37;960;64;64;64
+		phosphor-text-t-thin;37;0;128;64;64
+		phosphor-text-t;37;64;128;64;64
+		phosphor-text-underline-bold;37;128;128;64;64
+		phosphor-text-underline-duotone;37;192;128;64;64
+		phosphor-text-underline-fill;37;256;128;64;64
+		phosphor-text-underline-light;37;320;128;64;64
+		phosphor-text-underline-thin;37;384;128;64;64
+		phosphor-text-underline;37;448;128;64;64
+		phosphor-textbox-bold;37;512;128;64;64
+		phosphor-textbox-duotone;37;576;128;64;64
+		phosphor-textbox-fill;37;640;128;64;64
+		phosphor-textbox-light;37;704;128;64;64
+		phosphor-textbox-thin;37;768;128;64;64
+		phosphor-textbox;37;832;128;64;64
+		phosphor-thermometer-bold;37;896;128;64;64
+		phosphor-thermometer-cold-bold;37;960;128;64;64
+		phosphor-thermometer-cold-duotone;37;0;192;64;64
+		phosphor-thermometer-cold-fill;37;64;192;64;64
+		phosphor-thermometer-cold-light;37;128;192;64;64
+		phosphor-thermometer-cold-thin;37;192;192;64;64
+		phosphor-thermometer-cold;37;256;192;64;64
+		phosphor-thermometer-duotone;37;320;192;64;64
+		phosphor-thermometer-fill;37;384;192;64;64
+		phosphor-thermometer-hot-bold;37;448;192;64;64
+		phosphor-thermometer-hot-duotone;37;512;192;64;64
+		phosphor-thermometer-hot-fill;37;576;192;64;64
+		phosphor-thermometer-hot-light;37;640;192;64;64
+		phosphor-thermometer-hot-thin;37;704;192;64;64
+		phosphor-thermometer-hot;37;768;192;64;64
+		phosphor-thermometer-light;37;832;192;64;64
+		phosphor-thermometer-simple-bold;37;896;192;64;64
+		phosphor-thermometer-simple-duotone;37;960;192;64;64
+		phosphor-thermometer-simple-fill;37;0;256;64;64
+		phosphor-thermometer-simple-light;37;64;256;64;64
+		phosphor-thermometer-simple-thin;37;128;256;64;64
+		phosphor-thermometer-simple;37;192;256;64;64
+		phosphor-thermometer-thin;37;256;256;64;64
+		phosphor-thermometer;37;320;256;64;64
+		phosphor-threads-logo-bold;37;384;256;64;64
+		phosphor-threads-logo-duotone;37;448;256;64;64
+		phosphor-threads-logo-fill;37;512;256;64;64
+		phosphor-threads-logo-light;37;576;256;64;64
+		phosphor-threads-logo-thin;37;640;256;64;64
+		phosphor-threads-logo;37;704;256;64;64
+		phosphor-three-d-bold;37;768;256;64;64
+		phosphor-three-d-duotone;37;832;256;64;64
+		phosphor-three-d-fill;37;896;256;64;64
+		phosphor-three-d-light;37;960;256;64;64
+		phosphor-three-d-thin;37;0;320;64;64
+		phosphor-three-d;37;64;320;64;64
+		phosphor-thumbs-down-bold;37;128;320;64;64
+		phosphor-thumbs-down-duotone;37;192;320;64;64
+		phosphor-thumbs-down-fill;37;256;320;64;64
+		phosphor-thumbs-down-light;37;320;320;64;64
+		phosphor-thumbs-down-thin;37;384;320;64;64
+		phosphor-thumbs-down;37;448;320;64;64
+		phosphor-thumbs-up-bold;37;512;320;64;64
+		phosphor-thumbs-up-duotone;37;576;320;64;64
+		phosphor-thumbs-up-fill;37;640;320;64;64
+		phosphor-thumbs-up-light;37;704;320;64;64
+		phosphor-thumbs-up-thin;37;768;320;64;64
+		phosphor-thumbs-up;37;832;320;64;64
+		phosphor-ticket-bold;37;896;320;64;64
+		phosphor-ticket-duotone;37;960;320;64;64
+		phosphor-ticket-fill;37;0;384;64;64
+		phosphor-ticket-light;37;64;384;64;64
+		phosphor-ticket-thin;37;128;384;64;64
+		phosphor-ticket;37;192;384;64;64
+		phosphor-tidal-logo-bold;37;256;384;64;64
+		phosphor-tidal-logo-duotone;37;320;384;64;64
+		phosphor-tidal-logo-fill;37;384;384;64;64
+		phosphor-tidal-logo-light;37;448;384;64;64
+		phosphor-tidal-logo-thin;37;512;384;64;64
+		phosphor-tidal-logo;37;576;384;64;64
+		phosphor-tiktok-logo-bold;37;640;384;64;64
+		phosphor-tiktok-logo-duotone;37;704;384;64;64
+		phosphor-tiktok-logo-fill;37;768;384;64;64
+		phosphor-tiktok-logo-light;37;832;384;64;64
+		phosphor-tiktok-logo-thin;37;896;384;64;64
+		phosphor-tiktok-logo;37;960;384;64;64
+		phosphor-tilde-bold;37;0;448;64;64
+		phosphor-tilde-duotone;37;64;448;64;64
+		phosphor-tilde-fill;37;128;448;64;64
+		phosphor-tilde-light;37;192;448;64;64
+		phosphor-tilde-thin;37;256;448;64;64
+		phosphor-tilde;37;320;448;64;64
+		phosphor-timer-bold;37;384;448;64;64
+		phosphor-timer-duotone;37;448;448;64;64
+		phosphor-timer-fill;37;512;448;64;64
+		phosphor-timer-light;37;576;448;64;64
+		phosphor-timer-thin;37;640;448;64;64
+		phosphor-timer;37;704;448;64;64
+		phosphor-tip-jar-bold;37;768;448;64;64
+		phosphor-tip-jar-duotone;37;832;448;64;64
+		phosphor-tip-jar-fill;37;896;448;64;64
+		phosphor-tip-jar-light;37;960;448;64;64
+		phosphor-tip-jar-thin;37;0;512;64;64
+		phosphor-tip-jar;37;64;512;64;64
+		phosphor-tipi-bold;37;128;512;64;64
+		phosphor-tipi-duotone;37;192;512;64;64
+		phosphor-tipi-fill;37;256;512;64;64
+		phosphor-tipi-light;37;320;512;64;64
+		phosphor-tipi-thin;37;384;512;64;64
+		phosphor-tipi;37;448;512;64;64
+		phosphor-tire-bold;37;512;512;64;64
+		phosphor-tire-duotone;37;576;512;64;64
+		phosphor-tire-fill;37;640;512;64;64
+		phosphor-tire-light;37;704;512;64;64
+		phosphor-tire-thin;37;768;512;64;64
+		phosphor-tire;37;832;512;64;64
+		phosphor-toggle-left-bold;37;896;512;64;64
+		phosphor-toggle-left-duotone;37;960;512;64;64
+		phosphor-toggle-left-fill;37;0;576;64;64
+		phosphor-toggle-left-light;37;64;576;64;64
+		phosphor-toggle-left-thin;37;128;576;64;64
+		phosphor-toggle-left;37;192;576;64;64
+		phosphor-toggle-right-bold;37;256;576;64;64
+		phosphor-toggle-right-duotone;37;320;576;64;64
+		phosphor-toggle-right-fill;37;384;576;64;64
+		phosphor-toggle-right-light;37;448;576;64;64
+		phosphor-toggle-right-thin;37;512;576;64;64
+		phosphor-toggle-right;37;576;576;64;64
+		phosphor-toilet-bold;37;640;576;64;64
+		phosphor-toilet-duotone;37;704;576;64;64
+		phosphor-toilet-fill;37;768;576;64;64
+		phosphor-toilet-light;37;832;576;64;64
+		phosphor-toilet-paper-bold;37;896;576;64;64
+		phosphor-toilet-paper-duotone;37;960;576;64;64
+		phosphor-toilet-paper-fill;37;0;640;64;64
+		phosphor-toilet-paper-light;37;64;640;64;64
+		phosphor-toilet-paper-thin;37;128;640;64;64
+		phosphor-toilet-paper;37;192;640;64;64
+		phosphor-toilet-thin;37;256;640;64;64
+		phosphor-toilet;37;320;640;64;64
+		phosphor-toolbox-bold;37;384;640;64;64
+		phosphor-toolbox-duotone;37;448;640;64;64
+		phosphor-toolbox-fill;37;512;640;64;64
+		phosphor-toolbox-light;37;576;640;64;64
+		phosphor-toolbox-thin;37;640;640;64;64
+		phosphor-toolbox;37;704;640;64;64
+		phosphor-tooth-bold;37;768;640;64;64
+		phosphor-tooth-duotone;37;832;640;64;64
+		phosphor-tooth-fill;37;896;640;64;64
+		phosphor-tooth-light;37;960;640;64;64
+		phosphor-tooth-thin;37;0;704;64;64
+		phosphor-tooth;37;64;704;64;64
+		phosphor-tornado-bold;37;128;704;64;64
+		phosphor-tornado-duotone;37;192;704;64;64
+		phosphor-tornado-fill;37;256;704;64;64
+		phosphor-tornado-light;37;320;704;64;64
+		phosphor-tornado-thin;37;384;704;64;64
+		phosphor-tornado;37;448;704;64;64
+		phosphor-tote-bold;37;512;704;64;64
+		phosphor-tote-duotone;37;576;704;64;64
+		phosphor-tote-fill;37;640;704;64;64
+		phosphor-tote-light;37;704;704;64;64
+		phosphor-tote-simple-bold;37;768;704;64;64
+		phosphor-tote-simple-duotone;37;832;704;64;64
+		phosphor-tote-simple-fill;37;896;704;64;64
+		phosphor-tote-simple-light;37;960;704;64;64
+		phosphor-tote-simple-thin;37;0;768;64;64
+		phosphor-tote-simple;37;64;768;64;64
+		phosphor-tote-thin;37;128;768;64;64
+		phosphor-tote;37;192;768;64;64
+		phosphor-towel-bold;37;256;768;64;64
+		phosphor-towel-duotone;37;320;768;64;64
+		phosphor-towel-fill;37;384;768;64;64
+		phosphor-towel-light;37;448;768;64;64
+		phosphor-towel-thin;37;512;768;64;64
+		phosphor-towel;37;576;768;64;64
+		phosphor-tractor-bold;37;640;768;64;64
+		phosphor-tractor-duotone;37;704;768;64;64
+		phosphor-tractor-fill;37;768;768;64;64
+		phosphor-tractor-light;37;832;768;64;64
+		phosphor-tractor-thin;37;896;768;64;64
+		phosphor-tractor;37;960;768;64;64
+		phosphor-trademark-bold;37;0;832;64;64
+		phosphor-trademark-duotone;37;64;832;64;64
+		phosphor-trademark-fill;37;128;832;64;64
+		phosphor-trademark-light;37;192;832;64;64
+		phosphor-trademark-registered-bold;37;256;832;64;64
+		phosphor-trademark-registered-duotone;37;320;832;64;64
+		phosphor-trademark-registered-fill;37;384;832;64;64
+		phosphor-trademark-registered-light;37;448;832;64;64
+		phosphor-trademark-registered-thin;37;512;832;64;64
+		phosphor-trademark-registered;37;576;832;64;64
+		phosphor-trademark-thin;37;640;832;64;64
+		phosphor-trademark;37;704;832;64;64
+		phosphor-traffic-cone-bold;37;768;832;64;64
+		phosphor-traffic-cone-duotone;37;832;832;64;64
+		phosphor-traffic-cone-fill;37;896;832;64;64
+		phosphor-traffic-cone-light;37;960;832;64;64
+		phosphor-traffic-cone-thin;37;0;896;64;64
+		phosphor-traffic-cone;37;64;896;64;64
+		phosphor-traffic-sign-bold;37;128;896;64;64
+		phosphor-traffic-sign-duotone;37;192;896;64;64
+		phosphor-traffic-sign-fill;37;256;896;64;64
+		phosphor-traffic-sign-light;37;320;896;64;64
+		phosphor-traffic-sign-thin;37;384;896;64;64
+		phosphor-traffic-sign;37;448;896;64;64
+		phosphor-traffic-signal-bold;37;512;896;64;64
+		phosphor-traffic-signal-duotone;37;576;896;64;64
+		phosphor-traffic-signal-fill;37;640;896;64;64
+		phosphor-traffic-signal-light;37;704;896;64;64
+		phosphor-traffic-signal-thin;37;768;896;64;64
+		phosphor-traffic-signal;37;832;896;64;64
+		phosphor-train-bold;37;896;896;64;64
+		phosphor-train-duotone;37;960;896;64;64
+		phosphor-train-fill;37;0;960;64;64
+		phosphor-train-light;37;64;960;64;64
+		phosphor-train-regional-bold;37;128;960;64;64
+		phosphor-train-regional-duotone;37;192;960;64;64
+		phosphor-train-regional-fill;37;256;960;64;64
+		phosphor-train-regional-light;37;320;960;64;64
+		phosphor-train-regional-thin;37;384;960;64;64
+		phosphor-train-regional;37;448;960;64;64
+		phosphor-train-simple-bold;37;512;960;64;64
+		phosphor-train-simple-duotone;37;576;960;64;64
+		phosphor-train-simple-fill;37;640;960;64;64
+		phosphor-train-simple-light;37;704;960;64;64
+		phosphor-train-simple-thin;37;768;960;64;64
+		phosphor-train-simple;37;832;960;64;64
+		phosphor-train-thin;37;896;960;64;64
+		phosphor-train;37;960;960;64;64
+		phosphor-tram-bold;38;0;0;64;64
+		phosphor-tram-duotone;38;64;0;64;64
+		phosphor-tram-fill;38;128;0;64;64
+		phosphor-tram-light;38;192;0;64;64
+		phosphor-tram-thin;38;256;0;64;64
+		phosphor-tram;38;320;0;64;64
+		phosphor-translate-bold;38;384;0;64;64
+		phosphor-translate-duotone;38;448;0;64;64
+		phosphor-translate-fill;38;512;0;64;64
+		phosphor-translate-light;38;576;0;64;64
+		phosphor-translate-thin;38;640;0;64;64
+		phosphor-translate;38;704;0;64;64
+		phosphor-trash-bold;38;768;0;64;64
+		phosphor-trash-duotone;38;832;0;64;64
+		phosphor-trash-fill;38;896;0;64;64
+		phosphor-trash-light;38;960;0;64;64
+		phosphor-trash-simple-bold;38;0;64;64;64
+		phosphor-trash-simple-duotone;38;64;64;64;64
+		phosphor-trash-simple-fill;38;128;64;64;64
+		phosphor-trash-simple-light;38;192;64;64;64
+		phosphor-trash-simple-thin;38;256;64;64;64
+		phosphor-trash-simple;38;320;64;64;64
+		phosphor-trash-thin;38;384;64;64;64
+		phosphor-trash;38;448;64;64;64
+		phosphor-tray-arrow-down-bold;38;512;64;64;64
+		phosphor-tray-arrow-down-duotone;38;576;64;64;64
+		phosphor-tray-arrow-down-fill;38;640;64;64;64
+		phosphor-tray-arrow-down-light;38;704;64;64;64
+		phosphor-tray-arrow-down-thin;38;768;64;64;64
+		phosphor-tray-arrow-down;38;832;64;64;64
+		phosphor-tray-arrow-up-bold;38;896;64;64;64
+		phosphor-tray-arrow-up-duotone;38;960;64;64;64
+		phosphor-tray-arrow-up-fill;38;0;128;64;64
+		phosphor-tray-arrow-up-light;38;64;128;64;64
+		phosphor-tray-arrow-up-thin;38;128;128;64;64
+		phosphor-tray-arrow-up;38;192;128;64;64
+		phosphor-tray-bold;38;256;128;64;64
+		phosphor-tray-duotone;38;320;128;64;64
+		phosphor-tray-fill;38;384;128;64;64
+		phosphor-tray-light;38;448;128;64;64
+		phosphor-tray-thin;38;512;128;64;64
+		phosphor-tray;38;576;128;64;64
+		phosphor-treasure-chest-bold;38;640;128;64;64
+		phosphor-treasure-chest-duotone;38;704;128;64;64
+		phosphor-treasure-chest-fill;38;768;128;64;64
+		phosphor-treasure-chest-light;38;832;128;64;64
+		phosphor-treasure-chest-thin;38;896;128;64;64
+		phosphor-treasure-chest;38;960;128;64;64
+		phosphor-tree-bold;38;0;192;64;64
+		phosphor-tree-duotone;38;64;192;64;64
+		phosphor-tree-evergreen-bold;38;128;192;64;64
+		phosphor-tree-evergreen-duotone;38;192;192;64;64
+		phosphor-tree-evergreen-fill;38;256;192;64;64
+		phosphor-tree-evergreen-light;38;320;192;64;64
+		phosphor-tree-evergreen-thin;38;384;192;64;64
+		phosphor-tree-evergreen;38;448;192;64;64
+		phosphor-tree-fill;38;512;192;64;64
+		phosphor-tree-light;38;576;192;64;64
+		phosphor-tree-palm-bold;38;640;192;64;64
+		phosphor-tree-palm-duotone;38;704;192;64;64
+		phosphor-tree-palm-fill;38;768;192;64;64
+		phosphor-tree-palm-light;38;832;192;64;64
+		phosphor-tree-palm-thin;38;896;192;64;64
+		phosphor-tree-palm;38;960;192;64;64
+		phosphor-tree-structure-bold;38;0;256;64;64
+		phosphor-tree-structure-duotone;38;64;256;64;64
+		phosphor-tree-structure-fill;38;128;256;64;64
+		phosphor-tree-structure-light;38;192;256;64;64
+		phosphor-tree-structure-thin;38;256;256;64;64
+		phosphor-tree-structure;38;320;256;64;64
+		phosphor-tree-thin;38;384;256;64;64
+		phosphor-tree-view-bold;38;448;256;64;64
+		phosphor-tree-view-duotone;38;512;256;64;64
+		phosphor-tree-view-fill;38;576;256;64;64
+		phosphor-tree-view-light;38;640;256;64;64
+		phosphor-tree-view-thin;38;704;256;64;64
+		phosphor-tree-view;38;768;256;64;64
+		phosphor-tree;38;832;256;64;64
+		phosphor-trend-down-bold;38;896;256;64;64
+		phosphor-trend-down-duotone;38;960;256;64;64
+		phosphor-trend-down-fill;38;0;320;64;64
+		phosphor-trend-down-light;38;64;320;64;64
+		phosphor-trend-down-thin;38;128;320;64;64
+		phosphor-trend-down;38;192;320;64;64
+		phosphor-trend-up-bold;38;256;320;64;64
+		phosphor-trend-up-duotone;38;320;320;64;64
+		phosphor-trend-up-fill;38;384;320;64;64
+		phosphor-trend-up-light;38;448;320;64;64
+		phosphor-trend-up-thin;38;512;320;64;64
+		phosphor-trend-up;38;576;320;64;64
+		phosphor-triangle-bold;38;640;320;64;64
+		phosphor-triangle-dashed-bold;38;704;320;64;64
+		phosphor-triangle-dashed-duotone;38;768;320;64;64
+		phosphor-triangle-dashed-fill;38;832;320;64;64
+		phosphor-triangle-dashed-light;38;896;320;64;64
+		phosphor-triangle-dashed-thin;38;960;320;64;64
+		phosphor-triangle-dashed;38;0;384;64;64
+		phosphor-triangle-duotone;38;64;384;64;64
+		phosphor-triangle-fill;38;128;384;64;64
+		phosphor-triangle-light;38;192;384;64;64
+		phosphor-triangle-thin;38;256;384;64;64
+		phosphor-triangle;38;320;384;64;64
+		phosphor-trolley-bold;38;384;384;64;64
+		phosphor-trolley-duotone;38;448;384;64;64
+		phosphor-trolley-fill;38;512;384;64;64
+		phosphor-trolley-light;38;576;384;64;64
+		phosphor-trolley-suitcase-bold;38;640;384;64;64
+		phosphor-trolley-suitcase-duotone;38;704;384;64;64
+		phosphor-trolley-suitcase-fill;38;768;384;64;64
+		phosphor-trolley-suitcase-light;38;832;384;64;64
+		phosphor-trolley-suitcase-thin;38;896;384;64;64
+		phosphor-trolley-suitcase;38;960;384;64;64
+		phosphor-trolley-thin;38;0;448;64;64
+		phosphor-trolley;38;64;448;64;64
+		phosphor-trophy-bold;38;128;448;64;64
+		phosphor-trophy-duotone;38;192;448;64;64
+		phosphor-trophy-fill;38;256;448;64;64
+		phosphor-trophy-light;38;320;448;64;64
+		phosphor-trophy-thin;38;384;448;64;64
+		phosphor-trophy;38;448;448;64;64
+		phosphor-truck-bold;38;512;448;64;64
+		phosphor-truck-duotone;38;576;448;64;64
+		phosphor-truck-fill;38;640;448;64;64
+		phosphor-truck-light;38;704;448;64;64
+		phosphor-truck-thin;38;768;448;64;64
+		phosphor-truck-trailer-bold;38;832;448;64;64
+		phosphor-truck-trailer-duotone;38;896;448;64;64
+		phosphor-truck-trailer-fill;38;960;448;64;64
+		phosphor-truck-trailer-light;38;0;512;64;64
+		phosphor-truck-trailer-thin;38;64;512;64;64
+		phosphor-truck-trailer;38;128;512;64;64
+		phosphor-truck;38;192;512;64;64
+		phosphor-tumblr-logo-bold;38;256;512;64;64
+		phosphor-tumblr-logo-duotone;38;320;512;64;64
+		phosphor-tumblr-logo-fill;38;384;512;64;64
+		phosphor-tumblr-logo-light;38;448;512;64;64
+		phosphor-tumblr-logo-thin;38;512;512;64;64
+		phosphor-tumblr-logo;38;576;512;64;64
+		phosphor-twitch-logo-bold;38;640;512;64;64
+		phosphor-twitch-logo-duotone;38;704;512;64;64
+		phosphor-twitch-logo-fill;38;768;512;64;64
+		phosphor-twitch-logo-light;38;832;512;64;64
+		phosphor-twitch-logo-thin;38;896;512;64;64
+		phosphor-twitch-logo;38;960;512;64;64
+		phosphor-twitter-logo-bold;38;0;576;64;64
+		phosphor-twitter-logo-duotone;38;64;576;64;64
+		phosphor-twitter-logo-fill;38;128;576;64;64
+		phosphor-twitter-logo-light;38;192;576;64;64
+		phosphor-twitter-logo-thin;38;256;576;64;64
+		phosphor-twitter-logo;38;320;576;64;64
+		phosphor-umbrella-bold;38;384;576;64;64
+		phosphor-umbrella-duotone;38;448;576;64;64
+		phosphor-umbrella-fill;38;512;576;64;64
+		phosphor-umbrella-light;38;576;576;64;64
+		phosphor-umbrella-simple-bold;38;640;576;64;64
+		phosphor-umbrella-simple-duotone;38;704;576;64;64
+		phosphor-umbrella-simple-fill;38;768;576;64;64
+		phosphor-umbrella-simple-light;38;832;576;64;64
+		phosphor-umbrella-simple-thin;38;896;576;64;64
+		phosphor-umbrella-simple;38;960;576;64;64
+		phosphor-umbrella-thin;38;0;640;64;64
+		phosphor-umbrella;38;64;640;64;64
+		phosphor-union-bold;38;128;640;64;64
+		phosphor-union-duotone;38;192;640;64;64
+		phosphor-union-fill;38;256;640;64;64
+		phosphor-union-light;38;320;640;64;64
+		phosphor-union-thin;38;384;640;64;64
+		phosphor-union;38;448;640;64;64
+		phosphor-unite-bold;38;512;640;64;64
+		phosphor-unite-duotone;38;576;640;64;64
+		phosphor-unite-fill;38;640;640;64;64
+		phosphor-unite-light;38;704;640;64;64
+		phosphor-unite-square-bold;38;768;640;64;64
+		phosphor-unite-square-duotone;38;832;640;64;64
+		phosphor-unite-square-fill;38;896;640;64;64
+		phosphor-unite-square-light;38;960;640;64;64
+		phosphor-unite-square-thin;38;0;704;64;64
+		phosphor-unite-square;38;64;704;64;64
+		phosphor-unite-thin;38;128;704;64;64
+		phosphor-unite;38;192;704;64;64
+		phosphor-upload-bold;38;256;704;64;64
+		phosphor-upload-duotone;38;320;704;64;64
+		phosphor-upload-fill;38;384;704;64;64
+		phosphor-upload-light;38;448;704;64;64
+		phosphor-upload-simple-bold;38;512;704;64;64
+		phosphor-upload-simple-duotone;38;576;704;64;64
+		phosphor-upload-simple-fill;38;640;704;64;64
+		phosphor-upload-simple-light;38;704;704;64;64
+		phosphor-upload-simple-thin;38;768;704;64;64
+		phosphor-upload-simple;38;832;704;64;64
+		phosphor-upload-thin;38;896;704;64;64
+		phosphor-upload;38;960;704;64;64
+		phosphor-usb-bold;38;0;768;64;64
+		phosphor-usb-duotone;38;64;768;64;64
+		phosphor-usb-fill;38;128;768;64;64
+		phosphor-usb-light;38;192;768;64;64
+		phosphor-usb-thin;38;256;768;64;64
+		phosphor-usb;38;320;768;64;64
+		phosphor-user-bold;38;384;768;64;64
+		phosphor-user-check-bold;38;448;768;64;64
+		phosphor-user-check-duotone;38;512;768;64;64
+		phosphor-user-check-fill;38;576;768;64;64
+		phosphor-user-check-light;38;640;768;64;64
+		phosphor-user-check-thin;38;704;768;64;64
+		phosphor-user-check;38;768;768;64;64
+		phosphor-user-circle-bold;38;832;768;64;64
+		phosphor-user-circle-check-bold;38;896;768;64;64
+		phosphor-user-circle-check-duotone;38;960;768;64;64
+		phosphor-user-circle-check-fill;38;0;832;64;64
+		phosphor-user-circle-check-light;38;64;832;64;64
+		phosphor-user-circle-check-thin;38;128;832;64;64
+		phosphor-user-circle-check;38;192;832;64;64
+		phosphor-user-circle-dashed-bold;38;256;832;64;64
+		phosphor-user-circle-dashed-duotone;38;320;832;64;64
+		phosphor-user-circle-dashed-fill;38;384;832;64;64
+		phosphor-user-circle-dashed-light;38;448;832;64;64
+		phosphor-user-circle-dashed-thin;38;512;832;64;64
+		phosphor-user-circle-dashed;38;576;832;64;64
+		phosphor-user-circle-duotone;38;640;832;64;64
+		phosphor-user-circle-fill;38;704;832;64;64
+		phosphor-user-circle-gear-bold;38;768;832;64;64
+		phosphor-user-circle-gear-duotone;38;832;832;64;64
+		phosphor-user-circle-gear-fill;38;896;832;64;64
+		phosphor-user-circle-gear-light;38;960;832;64;64
+		phosphor-user-circle-gear-thin;38;0;896;64;64
+		phosphor-user-circle-gear;38;64;896;64;64
+		phosphor-user-circle-light;38;128;896;64;64
+		phosphor-user-circle-minus-bold;38;192;896;64;64
+		phosphor-user-circle-minus-duotone;38;256;896;64;64
+		phosphor-user-circle-minus-fill;38;320;896;64;64
+		phosphor-user-circle-minus-light;38;384;896;64;64
+		phosphor-user-circle-minus-thin;38;448;896;64;64
+		phosphor-user-circle-minus;38;512;896;64;64
+		phosphor-user-circle-plus-bold;38;576;896;64;64
+		phosphor-user-circle-plus-duotone;38;640;896;64;64
+		phosphor-user-circle-plus-fill;38;704;896;64;64
+		phosphor-user-circle-plus-light;38;768;896;64;64
+		phosphor-user-circle-plus-thin;38;832;896;64;64
+		phosphor-user-circle-plus;38;896;896;64;64
+		phosphor-user-circle-thin;38;960;896;64;64
+		phosphor-user-circle;38;0;960;64;64
+		phosphor-user-duotone;38;64;960;64;64
+		phosphor-user-fill;38;128;960;64;64
+		phosphor-user-focus-bold;38;192;960;64;64
+		phosphor-user-focus-duotone;38;256;960;64;64
+		phosphor-user-focus-fill;38;320;960;64;64
+		phosphor-user-focus-light;38;384;960;64;64
+		phosphor-user-focus-thin;38;448;960;64;64
+		phosphor-user-focus;38;512;960;64;64
+		phosphor-user-gear-bold;38;576;960;64;64
+		phosphor-user-gear-duotone;38;640;960;64;64
+		phosphor-user-gear-fill;38;704;960;64;64
+		phosphor-user-gear-light;38;768;960;64;64
+		phosphor-user-gear-thin;38;832;960;64;64
+		phosphor-user-gear;38;896;960;64;64
+		phosphor-user-light;38;960;960;64;64
+		phosphor-user-list-bold;39;0;0;64;64
+		phosphor-user-list-duotone;39;64;0;64;64
+		phosphor-user-list-fill;39;128;0;64;64
+		phosphor-user-list-light;39;192;0;64;64
+		phosphor-user-list-thin;39;256;0;64;64
+		phosphor-user-list;39;320;0;64;64
+		phosphor-user-minus-bold;39;384;0;64;64
+		phosphor-user-minus-duotone;39;448;0;64;64
+		phosphor-user-minus-fill;39;512;0;64;64
+		phosphor-user-minus-light;39;576;0;64;64
+		phosphor-user-minus-thin;39;640;0;64;64
+		phosphor-user-minus;39;704;0;64;64
+		phosphor-user-plus-bold;39;768;0;64;64
+		phosphor-user-plus-duotone;39;832;0;64;64
+		phosphor-user-plus-fill;39;896;0;64;64
+		phosphor-user-plus-light;39;960;0;64;64
+		phosphor-user-plus-thin;39;0;64;64;64
+		phosphor-user-plus;39;64;64;64;64
+		phosphor-user-rectangle-bold;39;128;64;64;64
+		phosphor-user-rectangle-duotone;39;192;64;64;64
+		phosphor-user-rectangle-fill;39;256;64;64;64
+		phosphor-user-rectangle-light;39;320;64;64;64
+		phosphor-user-rectangle-thin;39;384;64;64;64
+		phosphor-user-rectangle;39;448;64;64;64
+		phosphor-user-sound-bold;39;512;64;64;64
+		phosphor-user-sound-duotone;39;576;64;64;64
+		phosphor-user-sound-fill;39;640;64;64;64
+		phosphor-user-sound-light;39;704;64;64;64
+		phosphor-user-sound-thin;39;768;64;64;64
+		phosphor-user-sound;39;832;64;64;64
+		phosphor-user-square-bold;39;896;64;64;64
+		phosphor-user-square-duotone;39;960;64;64;64
+		phosphor-user-square-fill;39;0;128;64;64
+		phosphor-user-square-light;39;64;128;64;64
+		phosphor-user-square-thin;39;128;128;64;64
+		phosphor-user-square;39;192;128;64;64
+		phosphor-user-switch-bold;39;256;128;64;64
+		phosphor-user-switch-duotone;39;320;128;64;64
+		phosphor-user-switch-fill;39;384;128;64;64
+		phosphor-user-switch-light;39;448;128;64;64
+		phosphor-user-switch-thin;39;512;128;64;64
+		phosphor-user-switch;39;576;128;64;64
+		phosphor-user-thin;39;640;128;64;64
+		phosphor-user;39;704;128;64;64
+		phosphor-users-bold;39;768;128;64;64
+		phosphor-users-duotone;39;832;128;64;64
+		phosphor-users-fill;39;896;128;64;64
+		phosphor-users-four-bold;39;960;128;64;64
+		phosphor-users-four-duotone;39;0;192;64;64
+		phosphor-users-four-fill;39;64;192;64;64
+		phosphor-users-four-light;39;128;192;64;64
+		phosphor-users-four-thin;39;192;192;64;64
+		phosphor-users-four;39;256;192;64;64
+		phosphor-users-light;39;320;192;64;64
+		phosphor-users-thin;39;384;192;64;64
+		phosphor-users-three-bold;39;448;192;64;64
+		phosphor-users-three-duotone;39;512;192;64;64
+		phosphor-users-three-fill;39;576;192;64;64
+		phosphor-users-three-light;39;640;192;64;64
+		phosphor-users-three-thin;39;704;192;64;64
+		phosphor-users-three;39;768;192;64;64
+		phosphor-users;39;832;192;64;64
+		phosphor-van-bold;39;896;192;64;64
+		phosphor-van-duotone;39;960;192;64;64
+		phosphor-van-fill;39;0;256;64;64
+		phosphor-van-light;39;64;256;64;64
+		phosphor-van-thin;39;128;256;64;64
+		phosphor-van;39;192;256;64;64
+		phosphor-vault-bold;39;256;256;64;64
+		phosphor-vault-duotone;39;320;256;64;64
+		phosphor-vault-fill;39;384;256;64;64
+		phosphor-vault-light;39;448;256;64;64
+		phosphor-vault-thin;39;512;256;64;64
+		phosphor-vault;39;576;256;64;64
+		phosphor-vector-three-bold;39;640;256;64;64
+		phosphor-vector-three-duotone;39;704;256;64;64
+		phosphor-vector-three-fill;39;768;256;64;64
+		phosphor-vector-three-light;39;832;256;64;64
+		phosphor-vector-three-thin;39;896;256;64;64
+		phosphor-vector-three;39;960;256;64;64
+		phosphor-vector-two-bold;39;0;320;64;64
+		phosphor-vector-two-duotone;39;64;320;64;64
+		phosphor-vector-two-fill;39;128;320;64;64
+		phosphor-vector-two-light;39;192;320;64;64
+		phosphor-vector-two-thin;39;256;320;64;64
+		phosphor-vector-two;39;320;320;64;64
+		phosphor-vibrate-bold;39;384;320;64;64
+		phosphor-vibrate-duotone;39;448;320;64;64
+		phosphor-vibrate-fill;39;512;320;64;64
+		phosphor-vibrate-light;39;576;320;64;64
+		phosphor-vibrate-thin;39;640;320;64;64
+		phosphor-vibrate;39;704;320;64;64
+		phosphor-video-bold;39;768;320;64;64
+		phosphor-video-camera-bold;39;832;320;64;64
+		phosphor-video-camera-duotone;39;896;320;64;64
+		phosphor-video-camera-fill;39;960;320;64;64
+		phosphor-video-camera-light;39;0;384;64;64
+		phosphor-video-camera-slash-bold;39;64;384;64;64
+		phosphor-video-camera-slash-duotone;39;128;384;64;64
+		phosphor-video-camera-slash-fill;39;192;384;64;64
+		phosphor-video-camera-slash-light;39;256;384;64;64
+		phosphor-video-camera-slash-thin;39;320;384;64;64
+		phosphor-video-camera-slash;39;384;384;64;64
+		phosphor-video-camera-thin;39;448;384;64;64
+		phosphor-video-camera;39;512;384;64;64
+		phosphor-video-conference-bold;39;576;384;64;64
+		phosphor-video-conference-duotone;39;640;384;64;64
+		phosphor-video-conference-fill;39;704;384;64;64
+		phosphor-video-conference-light;39;768;384;64;64
+		phosphor-video-conference-thin;39;832;384;64;64
+		phosphor-video-conference;39;896;384;64;64
+		phosphor-video-duotone;39;960;384;64;64
+		phosphor-video-fill;39;0;448;64;64
+		phosphor-video-light;39;64;448;64;64
+		phosphor-video-thin;39;128;448;64;64
+		phosphor-video;39;192;448;64;64
+		phosphor-vignette-bold;39;256;448;64;64
+		phosphor-vignette-duotone;39;320;448;64;64
+		phosphor-vignette-fill;39;384;448;64;64
+		phosphor-vignette-light;39;448;448;64;64
+		phosphor-vignette-thin;39;512;448;64;64
+		phosphor-vignette;39;576;448;64;64
+		phosphor-vinyl-record-bold;39;640;448;64;64
+		phosphor-vinyl-record-duotone;39;704;448;64;64
+		phosphor-vinyl-record-fill;39;768;448;64;64
+		phosphor-vinyl-record-light;39;832;448;64;64
+		phosphor-vinyl-record-thin;39;896;448;64;64
+		phosphor-vinyl-record;39;960;448;64;64
+		phosphor-virtual-reality-bold;39;0;512;64;64
+		phosphor-virtual-reality-duotone;39;64;512;64;64
+		phosphor-virtual-reality-fill;39;128;512;64;64
+		phosphor-virtual-reality-light;39;192;512;64;64
+		phosphor-virtual-reality-thin;39;256;512;64;64
+		phosphor-virtual-reality;39;320;512;64;64
+		phosphor-virus-bold;39;384;512;64;64
+		phosphor-virus-duotone;39;448;512;64;64
+		phosphor-virus-fill;39;512;512;64;64
+		phosphor-virus-light;39;576;512;64;64
+		phosphor-virus-thin;39;640;512;64;64
+		phosphor-virus;39;704;512;64;64
+		phosphor-visor-bold;39;768;512;64;64
+		phosphor-visor-duotone;39;832;512;64;64
+		phosphor-visor-fill;39;896;512;64;64
+		phosphor-visor-light;39;960;512;64;64
+		phosphor-visor-thin;39;0;576;64;64
+		phosphor-visor;39;64;576;64;64
+		phosphor-voicemail-bold;39;128;576;64;64
+		phosphor-voicemail-duotone;39;192;576;64;64
+		phosphor-voicemail-fill;39;256;576;64;64
+		phosphor-voicemail-light;39;320;576;64;64
+		phosphor-voicemail-thin;39;384;576;64;64
+		phosphor-voicemail;39;448;576;64;64
+		phosphor-volleyball-bold;39;512;576;64;64
+		phosphor-volleyball-duotone;39;576;576;64;64
+		phosphor-volleyball-fill;39;640;576;64;64
+		phosphor-volleyball-light;39;704;576;64;64
+		phosphor-volleyball-thin;39;768;576;64;64
+		phosphor-volleyball;39;832;576;64;64
+		phosphor-wall-bold;39;896;576;64;64
+		phosphor-wall-duotone;39;960;576;64;64
+		phosphor-wall-fill;39;0;640;64;64
+		phosphor-wall-light;39;64;640;64;64
+		phosphor-wall-thin;39;128;640;64;64
+		phosphor-wall;39;192;640;64;64
+		phosphor-wallet-bold;39;256;640;64;64
+		phosphor-wallet-duotone;39;320;640;64;64
+		phosphor-wallet-fill;39;384;640;64;64
+		phosphor-wallet-light;39;448;640;64;64
+		phosphor-wallet-thin;39;512;640;64;64
+		phosphor-wallet;39;576;640;64;64
+		phosphor-warehouse-bold;39;640;640;64;64
+		phosphor-warehouse-duotone;39;704;640;64;64
+		phosphor-warehouse-fill;39;768;640;64;64
+		phosphor-warehouse-light;39;832;640;64;64
+		phosphor-warehouse-thin;39;896;640;64;64
+		phosphor-warehouse;39;960;640;64;64
+		phosphor-warning-bold;39;0;704;64;64
+		phosphor-warning-circle-bold;39;64;704;64;64
+		phosphor-warning-circle-duotone;39;128;704;64;64
+		phosphor-warning-circle-fill;39;192;704;64;64
+		phosphor-warning-circle-light;39;256;704;64;64
+		phosphor-warning-circle-thin;39;320;704;64;64
+		phosphor-warning-circle;39;384;704;64;64
+		phosphor-warning-diamond-bold;39;448;704;64;64
+		phosphor-warning-diamond-duotone;39;512;704;64;64
+		phosphor-warning-diamond-fill;39;576;704;64;64
+		phosphor-warning-diamond-light;39;640;704;64;64
+		phosphor-warning-diamond-thin;39;704;704;64;64
+		phosphor-warning-diamond;39;768;704;64;64
+		phosphor-warning-duotone;39;832;704;64;64
+		phosphor-warning-fill;39;896;704;64;64
+		phosphor-warning-light;39;960;704;64;64
+		phosphor-warning-octagon-bold;39;0;768;64;64
+		phosphor-warning-octagon-duotone;39;64;768;64;64
+		phosphor-warning-octagon-fill;39;128;768;64;64
+		phosphor-warning-octagon-light;39;192;768;64;64
+		phosphor-warning-octagon-thin;39;256;768;64;64
+		phosphor-warning-octagon;39;320;768;64;64
+		phosphor-warning-thin;39;384;768;64;64
+		phosphor-warning;39;448;768;64;64
+		phosphor-washing-machine-bold;39;512;768;64;64
+		phosphor-washing-machine-duotone;39;576;768;64;64
+		phosphor-washing-machine-fill;39;640;768;64;64
+		phosphor-washing-machine-light;39;704;768;64;64
+		phosphor-washing-machine-thin;39;768;768;64;64
+		phosphor-washing-machine;39;832;768;64;64
+		phosphor-watch-bold;39;896;768;64;64
+		phosphor-watch-duotone;39;960;768;64;64
+		phosphor-watch-fill;39;0;832;64;64
+		phosphor-watch-light;39;64;832;64;64
+		phosphor-watch-thin;39;128;832;64;64
+		phosphor-watch;39;192;832;64;64
+		phosphor-wave-sawtooth-bold;39;256;832;64;64
+		phosphor-wave-sawtooth-duotone;39;320;832;64;64
+		phosphor-wave-sawtooth-fill;39;384;832;64;64
+		phosphor-wave-sawtooth-light;39;448;832;64;64
+		phosphor-wave-sawtooth-thin;39;512;832;64;64
+		phosphor-wave-sawtooth;39;576;832;64;64
+		phosphor-wave-sine-bold;39;640;832;64;64
+		phosphor-wave-sine-duotone;39;704;832;64;64
+		phosphor-wave-sine-fill;39;768;832;64;64
+		phosphor-wave-sine-light;39;832;832;64;64
+		phosphor-wave-sine-thin;39;896;832;64;64
+		phosphor-wave-sine;39;960;832;64;64
+		phosphor-wave-square-bold;39;0;896;64;64
+		phosphor-wave-square-duotone;39;64;896;64;64
+		phosphor-wave-square-fill;39;128;896;64;64
+		phosphor-wave-square-light;39;192;896;64;64
+		phosphor-wave-square-thin;39;256;896;64;64
+		phosphor-wave-square;39;320;896;64;64
+		phosphor-wave-triangle-bold;39;384;896;64;64
+		phosphor-wave-triangle-duotone;39;448;896;64;64
+		phosphor-wave-triangle-fill;39;512;896;64;64
+		phosphor-wave-triangle-light;39;576;896;64;64
+		phosphor-wave-triangle-thin;39;640;896;64;64
+		phosphor-wave-triangle;39;704;896;64;64
+		phosphor-waveform-bold;39;768;896;64;64
+		phosphor-waveform-duotone;39;832;896;64;64
+		phosphor-waveform-fill;39;896;896;64;64
+		phosphor-waveform-light;39;960;896;64;64
+		phosphor-waveform-slash-bold;39;0;960;64;64
+		phosphor-waveform-slash-duotone;39;64;960;64;64
+		phosphor-waveform-slash-fill;39;128;960;64;64
+		phosphor-waveform-slash-light;39;192;960;64;64
+		phosphor-waveform-slash-thin;39;256;960;64;64
+		phosphor-waveform-slash;39;320;960;64;64
+		phosphor-waveform-thin;39;384;960;64;64
+		phosphor-waveform;39;448;960;64;64
+		phosphor-waves-bold;39;512;960;64;64
+		phosphor-waves-duotone;39;576;960;64;64
+		phosphor-waves-fill;39;640;960;64;64
+		phosphor-waves-light;39;704;960;64;64
+		phosphor-waves-thin;39;768;960;64;64
+		phosphor-waves;39;832;960;64;64
+		phosphor-webcam-bold;39;896;960;64;64
+		phosphor-webcam-duotone;39;960;960;64;64
+		phosphor-webcam-fill;40;0;0;64;64
+		phosphor-webcam-light;40;64;0;64;64
+		phosphor-webcam-slash-bold;40;128;0;64;64
+		phosphor-webcam-slash-duotone;40;192;0;64;64
+		phosphor-webcam-slash-fill;40;256;0;64;64
+		phosphor-webcam-slash-light;40;320;0;64;64
+		phosphor-webcam-slash-thin;40;384;0;64;64
+		phosphor-webcam-slash;40;448;0;64;64
+		phosphor-webcam-thin;40;512;0;64;64
+		phosphor-webcam;40;576;0;64;64
+		phosphor-webhooks-logo-bold;40;640;0;64;64
+		phosphor-webhooks-logo-duotone;40;704;0;64;64
+		phosphor-webhooks-logo-fill;40;768;0;64;64
+		phosphor-webhooks-logo-light;40;832;0;64;64
+		phosphor-webhooks-logo-thin;40;896;0;64;64
+		phosphor-webhooks-logo;40;960;0;64;64
+		phosphor-wechat-logo-bold;40;0;64;64;64
+		phosphor-wechat-logo-duotone;40;64;64;64;64
+		phosphor-wechat-logo-fill;40;128;64;64;64
+		phosphor-wechat-logo-light;40;192;64;64;64
+		phosphor-wechat-logo-thin;40;256;64;64;64
+		phosphor-wechat-logo;40;320;64;64;64
+		phosphor-whatsapp-logo-bold;40;384;64;64;64
+		phosphor-whatsapp-logo-duotone;40;448;64;64;64
+		phosphor-whatsapp-logo-fill;40;512;64;64;64
+		phosphor-whatsapp-logo-light;40;576;64;64;64
+		phosphor-whatsapp-logo-thin;40;640;64;64;64
+		phosphor-whatsapp-logo;40;704;64;64;64
+		phosphor-wheelchair-bold;40;768;64;64;64
+		phosphor-wheelchair-duotone;40;832;64;64;64
+		phosphor-wheelchair-fill;40;896;64;64;64
+		phosphor-wheelchair-light;40;960;64;64;64
+		phosphor-wheelchair-motion-bold;40;0;128;64;64
+		phosphor-wheelchair-motion-duotone;40;64;128;64;64
+		phosphor-wheelchair-motion-fill;40;128;128;64;64
+		phosphor-wheelchair-motion-light;40;192;128;64;64
+		phosphor-wheelchair-motion-thin;40;256;128;64;64
+		phosphor-wheelchair-motion;40;320;128;64;64
+		phosphor-wheelchair-thin;40;384;128;64;64
+		phosphor-wheelchair;40;448;128;64;64
+		phosphor-wifi-high-bold;40;512;128;64;64
+		phosphor-wifi-high-duotone;40;576;128;64;64
+		phosphor-wifi-high-fill;40;640;128;64;64
+		phosphor-wifi-high-light;40;704;128;64;64
+		phosphor-wifi-high-thin;40;768;128;64;64
+		phosphor-wifi-high;40;832;128;64;64
+		phosphor-wifi-low-bold;40;896;128;64;64
+		phosphor-wifi-low-duotone;40;960;128;64;64
+		phosphor-wifi-low-fill;40;0;192;64;64
+		phosphor-wifi-low-light;40;64;192;64;64
+		phosphor-wifi-low-thin;40;128;192;64;64
+		phosphor-wifi-low;40;192;192;64;64
+		phosphor-wifi-medium-bold;40;256;192;64;64
+		phosphor-wifi-medium-duotone;40;320;192;64;64
+		phosphor-wifi-medium-fill;40;384;192;64;64
+		phosphor-wifi-medium-light;40;448;192;64;64
+		phosphor-wifi-medium-thin;40;512;192;64;64
+		phosphor-wifi-medium;40;576;192;64;64
+		phosphor-wifi-none-bold;40;640;192;64;64
+		phosphor-wifi-none-duotone;40;704;192;64;64
+		phosphor-wifi-none-fill;40;768;192;64;64
+		phosphor-wifi-none-light;40;832;192;64;64
+		phosphor-wifi-none-thin;40;896;192;64;64
+		phosphor-wifi-none;40;960;192;64;64
+		phosphor-wifi-slash-bold;40;0;256;64;64
+		phosphor-wifi-slash-duotone;40;64;256;64;64
+		phosphor-wifi-slash-fill;40;128;256;64;64
+		phosphor-wifi-slash-light;40;192;256;64;64
+		phosphor-wifi-slash-thin;40;256;256;64;64
+		phosphor-wifi-slash;40;320;256;64;64
+		phosphor-wifi-x-bold;40;384;256;64;64
+		phosphor-wifi-x-duotone;40;448;256;64;64
+		phosphor-wifi-x-fill;40;512;256;64;64
+		phosphor-wifi-x-light;40;576;256;64;64
+		phosphor-wifi-x-thin;40;640;256;64;64
+		phosphor-wifi-x;40;704;256;64;64
+		phosphor-wind-bold;40;768;256;64;64
+		phosphor-wind-duotone;40;832;256;64;64
+		phosphor-wind-fill;40;896;256;64;64
+		phosphor-wind-light;40;960;256;64;64
+		phosphor-wind-thin;40;0;320;64;64
+		phosphor-wind;40;64;320;64;64
+		phosphor-windmill-bold;40;128;320;64;64
+		phosphor-windmill-duotone;40;192;320;64;64
+		phosphor-windmill-fill;40;256;320;64;64
+		phosphor-windmill-light;40;320;320;64;64
+		phosphor-windmill-thin;40;384;320;64;64
+		phosphor-windmill;40;448;320;64;64
+		phosphor-windows-logo-bold;40;512;320;64;64
+		phosphor-windows-logo-duotone;40;576;320;64;64
+		phosphor-windows-logo-fill;40;640;320;64;64
+		phosphor-windows-logo-light;40;704;320;64;64
+		phosphor-windows-logo-thin;40;768;320;64;64
+		phosphor-windows-logo;40;832;320;64;64
+		phosphor-wine-bold;40;896;320;64;64
+		phosphor-wine-duotone;40;960;320;64;64
+		phosphor-wine-fill;40;0;384;64;64
+		phosphor-wine-light;40;64;384;64;64
+		phosphor-wine-thin;40;128;384;64;64
+		phosphor-wine;40;192;384;64;64
+		phosphor-wrench-bold;40;256;384;64;64
+		phosphor-wrench-duotone;40;320;384;64;64
+		phosphor-wrench-fill;40;384;384;64;64
+		phosphor-wrench-light;40;448;384;64;64
+		phosphor-wrench-thin;40;512;384;64;64
+		phosphor-wrench;40;576;384;64;64
+		phosphor-x-bold;40;640;384;64;64
+		phosphor-x-circle-bold;40;704;384;64;64
+		phosphor-x-circle-duotone;40;768;384;64;64
+		phosphor-x-circle-fill;40;832;384;64;64
+		phosphor-x-circle-light;40;896;384;64;64
+		phosphor-x-circle-thin;40;960;384;64;64
+		phosphor-x-circle;40;0;448;64;64
+		phosphor-x-duotone;40;64;448;64;64
+		phosphor-x-fill;40;128;448;64;64
+		phosphor-x-light;40;192;448;64;64
+		phosphor-x-logo-bold;40;256;448;64;64
+		phosphor-x-logo-duotone;40;320;448;64;64
+		phosphor-x-logo-fill;40;384;448;64;64
+		phosphor-x-logo-light;40;448;448;64;64
+		phosphor-x-logo-thin;40;512;448;64;64
+		phosphor-x-logo;40;576;448;64;64
+		phosphor-x-square-bold;40;640;448;64;64
+		phosphor-x-square-duotone;40;704;448;64;64
+		phosphor-x-square-fill;40;768;448;64;64
+		phosphor-x-square-light;40;832;448;64;64
+		phosphor-x-square-thin;40;896;448;64;64
+		phosphor-x-square;40;960;448;64;64
+		phosphor-x-thin;40;0;512;64;64
+		phosphor-x;40;64;512;64;64
+		phosphor-yarn-bold;40;128;512;64;64
+		phosphor-yarn-duotone;40;192;512;64;64
+		phosphor-yarn-fill;40;256;512;64;64
+		phosphor-yarn-light;40;320;512;64;64
+		phosphor-yarn-thin;40;384;512;64;64
+		phosphor-yarn;40;448;512;64;64
+		phosphor-yin-yang-bold;40;512;512;64;64
+		phosphor-yin-yang-duotone;40;576;512;64;64
+		phosphor-yin-yang-fill;40;640;512;64;64
+		phosphor-yin-yang-light;40;704;512;64;64
+		phosphor-yin-yang-thin;40;768;512;64;64
+		phosphor-yin-yang;40;832;512;64;64
+		phosphor-youtube-logo-bold;40;896;512;64;64
+		phosphor-youtube-logo-duotone;40;960;512;64;64
+		phosphor-youtube-logo-fill;40;0;576;64;64
+		phosphor-youtube-logo-light;40;64;576;64;64
+		phosphor-youtube-logo-thin;40;128;576;64;64
+		phosphor-youtube-logo;40;192;576;64;64
+		pi;40;256;576;64;64
+		piano;40;320;576;64;64
+		pickaxe;40;384;576;64;64
+		picture-in-picture-2;40;448;576;64;64
+		picture-in-picture;40;512;576;64;64
+		piggy-bank;40;576;576;64;64
+		pilcrow-left;40;640;576;64;64
+		pilcrow-right;40;704;576;64;64
+		pilcrow;40;768;576;64;64
+		pill-bottle;40;832;576;64;64
+		pill;40;896;576;64;64
+		pin-off;40;960;576;64;64
+		pin;40;0;640;64;64
+		pipette;40;64;640;64;64
+		pizza;40;128;640;64;64
+		plane-landing;40;192;640;64;64
+		plane-takeoff;40;256;640;64;64
+		plane;40;320;640;64;64
+		play;40;384;640;64;64
+		plug-2;40;448;640;64;64
+		plug-zap;40;512;640;64;64
+		plug;40;576;640;64;64
+		plus;40;640;640;64;64
+		pocket-knife;40;704;640;64;64
+		pocket;40;768;640;64;64
+		podcast;40;832;640;64;64
+		pointer-off;40;896;640;64;64
+		pointer;40;960;640;64;64
+		popcorn;40;0;704;64;64
+		popsicle;40;64;704;64;64
+		pound-sterling;40;128;704;64;64
+		power-off;40;192;704;64;64
+		power;40;256;704;64;64
+		presentation;40;320;704;64;64
+		printer-check;40;384;704;64;64
+		printer;40;448;704;64;64
+		projector;40;512;704;64;64
+		proportions;40;576;704;64;64
+		puzzle;40;640;704;64;64
+		pyramid;40;704;704;64;64
+		qr-code;40;768;704;64;64
+		quote;40;832;704;64;64
+		rabbit;40;896;704;64;64
+		radar;40;960;704;64;64
+		radiation;40;0;768;64;64
+		radical;40;64;768;64;64
+		radio-receiver;40;128;768;64;64
+		radio-tower;40;192;768;64;64
+		radio;40;256;768;64;64
+		radius;40;320;768;64;64
+		rail-symbol;40;384;768;64;64
+		rainbow;40;448;768;64;64
+		rat;40;512;768;64;64
+		ratio;40;576;768;64;64
+		receipt-cent;40;640;768;64;64
+		receipt-euro;40;704;768;64;64
+		receipt-indian-rupee;40;768;768;64;64
+		receipt-japanese-yen;40;832;768;64;64
+		receipt-pound-sterling;40;896;768;64;64
+		receipt-russian-ruble;40;960;768;64;64
+		receipt-swiss-franc;40;0;832;64;64
+		receipt-text;40;64;832;64;64
+		receipt;40;128;832;64;64
+		rectangle-ellipsis;40;192;832;64;64
+		rectangle-horizontal;40;256;832;64;64
+		rectangle-vertical;40;320;832;64;64
+		recycle;40;384;832;64;64
+		redo-2;40;448;832;64;64
+		redo-dot;40;512;832;64;64
+		redo;40;576;832;64;64
+		refresh-ccw-dot;40;640;832;64;64
+		refresh-ccw;40;704;832;64;64
+		refresh-cw-off;40;768;832;64;64
+		refresh-cw;40;832;832;64;64
+		refrigerator;40;896;832;64;64
+		regex;40;960;832;64;64
+		remove-formatting;40;0;896;64;64
+		repeat-1;40;64;896;64;64
+		repeat-2;40;128;896;64;64
+		repeat;40;192;896;64;64
+		replace-all;40;256;896;64;64
+		replace;40;320;896;64;64
+		reply-all;40;384;896;64;64
+		reply;40;448;896;64;64
+		rewind;40;512;896;64;64
+		ribbon;40;576;896;64;64
+		rocket;40;640;896;64;64
+		rocking-chair;40;704;896;64;64
+		roller-coaster;40;768;896;64;64
+		rotate-3d;40;832;896;64;64
+		rotate-ccw-square;40;896;896;64;64
+		rotate-ccw;40;960;896;64;64
+		rotate-cw-square;40;0;960;64;64
+		rotate-cw;40;64;960;64;64
+		route-off;40;128;960;64;64
+		route;40;192;960;64;64
+		router;40;256;960;64;64
+		rows-2;40;320;960;64;64
+		rows-3;40;384;960;64;64
+		rows-4;40;448;960;64;64
+		rss;40;512;960;64;64
+		ruler;40;576;960;64;64
+		russian-ruble;40;640;960;64;64
+		sailboat;40;704;960;64;64
+		salad;40;768;960;64;64
+		sandwich;40;832;960;64;64
+		satellite-dish;40;896;960;64;64
+		satellite;40;960;960;64;64
+		save-all;41;0;0;64;64
+		save-off;41;64;0;64;64
+		save;41;128;0;64;64
+		scale-3d;41;192;0;64;64
+		scale;41;256;0;64;64
+		scaling;41;320;0;64;64
+		scan-barcode;41;384;0;64;64
+		scan-eye;41;448;0;64;64
+		scan-face;41;512;0;64;64
+		scan-heart;41;576;0;64;64
+		scan-line;41;640;0;64;64
+		scan-qr-code;41;704;0;64;64
+		scan-search;41;768;0;64;64
+		scan-text;41;832;0;64;64
+		scan;41;896;0;64;64
+		school;41;960;0;64;64
+		scissors-line-dashed;41;0;64;64;64
+		scissors;41;64;64;64;64
+		screen-share-off;41;128;64;64;64
+		screen-share;41;192;64;64;64
+		scroll-text;41;256;64;64;64
+		scroll;41;320;64;64;64
+		search-check;41;384;64;64;64
+		search-code;41;448;64;64;64
+		search-slash;41;512;64;64;64
+		search-x;41;576;64;64;64
+		search;41;640;64;64;64
+		section;41;704;64;64;64
+		send-horizontal;41;768;64;64;64
+		send-to-back;41;832;64;64;64
+		send;41;896;64;64;64
+		separator-horizontal;41;960;64;64;64
+		separator-vertical;41;0;128;64;64
+		server-cog;41;64;128;64;64
+		server-crash;41;128;128;64;64
+		server-off;41;192;128;64;64
+		server;41;256;128;64;64
+		settings-2;41;320;128;64;64
+		settings;41;384;128;64;64
+		shapes;41;448;128;64;64
+		share-2;41;512;128;64;64
+		share;41;576;128;64;64
+		sheet;41;640;128;64;64
+		shell;41;704;128;64;64
+		shield-alert;41;768;128;64;64
+		shield-ban;41;832;128;64;64
+		shield-check;41;896;128;64;64
+		shield-ellipsis;41;960;128;64;64
+		shield-half;41;0;192;64;64
+		shield-minus;41;64;192;64;64
+		shield-off;41;128;192;64;64
+		shield-plus;41;192;192;64;64
+		shield-question;41;256;192;64;64
+		shield-x;41;320;192;64;64
+		shield;41;384;192;64;64
+		ship-wheel;41;448;192;64;64
+		ship;41;512;192;64;64
+		shirt;41;576;192;64;64
+		shopping-bag;41;640;192;64;64
+		shopping-basket;41;704;192;64;64
+		shopping-cart;41;768;192;64;64
+		shovel;41;832;192;64;64
+		shower-head;41;896;192;64;64
+		shrink;41;960;192;64;64
+		shrub;41;0;256;64;64
+		shuffle;41;64;256;64;64
+		sigma;41;128;256;64;64
+		signal-high;41;192;256;64;64
+		signal-low;41;256;256;64;64
+		signal-medium;41;320;256;64;64
+		signal-zero;41;384;256;64;64
+		signal;41;448;256;64;64
+		signature;41;512;256;64;64
+		signpost-big;41;576;256;64;64
+		signpost;41;640;256;64;64
+		siren;41;704;256;64;64
+		skip-back;41;768;256;64;64
+		skip-forward;41;832;256;64;64
+		skull;41;896;256;64;64
+		slack;41;960;256;64;64
+		slash;41;0;320;64;64
+		slice;41;64;320;64;64
+		sliders-horizontal;41;128;320;64;64
+		sliders-vertical;41;192;320;64;64
+		smartphone-charging;41;256;320;64;64
+		smartphone-nfc;41;320;320;64;64
+		smartphone;41;384;320;64;64
+		smile-plus;41;448;320;64;64
+		smile;41;512;320;64;64
+		snail;41;576;320;64;64
+		snowflake;41;640;320;64;64
+		sofa;41;704;320;64;64
+		soup;41;768;320;64;64
+		space;41;832;320;64;64
+		spade;41;896;320;64;64
+		sparkle;41;960;320;64;64
+		sparkles;41;0;384;64;64
+		speaker;41;64;384;64;64
+		speech;41;128;384;64;64
+		spell-check-2;41;192;384;64;64
+		spell-check;41;256;384;64;64
+		spline;41;320;384;64;64
+		split;41;384;384;64;64
+		spray-can;41;448;384;64;64
+		sprout;41;512;384;64;64
+		square-activity;41;576;384;64;64
+		square-arrow-down-left;41;640;384;64;64
+		square-arrow-down-right;41;704;384;64;64
+		square-arrow-down;41;768;384;64;64
+		square-arrow-left;41;832;384;64;64
+		square-arrow-out-down-left;41;896;384;64;64
+		square-arrow-out-down-right;41;960;384;64;64
+		square-arrow-out-up-left;41;0;448;64;64
+		square-arrow-out-up-right;41;64;448;64;64
+		square-arrow-right;41;128;448;64;64
+		square-arrow-up-left;41;192;448;64;64
+		square-arrow-up-right;41;256;448;64;64
+		square-arrow-up;41;320;448;64;64
+		square-asterisk;41;384;448;64;64
+		square-bottom-dashed-scissors;41;448;448;64;64
+		square-chart-gantt;41;512;448;64;64
+		square-check-big;41;576;448;64;64
+		square-check;41;640;448;64;64
+		square-chevron-down;41;704;448;64;64
+		square-chevron-left;41;768;448;64;64
+		square-chevron-right;41;832;448;64;64
+		square-chevron-up;41;896;448;64;64
+		square-code;41;960;448;64;64
+		square-dashed-bottom-code;41;0;512;64;64
+		square-dashed-bottom;41;64;512;64;64
+		square-dashed-kanban;41;128;512;64;64
+		square-dashed-mouse-pointer;41;192;512;64;64
+		square-dashed;41;256;512;64;64
+		square-divide;41;320;512;64;64
+		square-dot;41;384;512;64;64
+		square-equal;41;448;512;64;64
+		square-function;41;512;512;64;64
+		square-kanban;41;576;512;64;64
+		square-library;41;640;512;64;64
+		square-m;41;704;512;64;64
+		square-menu;41;768;512;64;64
+		square-minus;41;832;512;64;64
+		square-mouse-pointer;41;896;512;64;64
+		square-parking-off;41;960;512;64;64
+		square-parking;41;0;576;64;64
+		square-pen;41;64;576;64;64
+		square-percent;41;128;576;64;64
+		square-pi;41;192;576;64;64
+		square-pilcrow;41;256;576;64;64
+		square-play;41;320;576;64;64
+		square-plus;41;384;576;64;64
+		square-power;41;448;576;64;64
+		square-radical;41;512;576;64;64
+		square-scissors;41;576;576;64;64
+		square-sigma;41;640;576;64;64
+		square-slash;41;704;576;64;64
+		square-split-horizontal;41;768;576;64;64
+		square-split-vertical;41;832;576;64;64
+		square-square;41;896;576;64;64
+		square-stack;41;960;576;64;64
+		square-terminal;41;0;640;64;64
+		square-user-round;41;64;640;64;64
+		square-user;41;128;640;64;64
+		square-x;41;192;640;64;64
+		square;41;256;640;64;64
+		squircle;41;320;640;64;64
+		squirrel;41;384;640;64;64
+		stamp;41;448;640;64;64
+		star-half;41;512;640;64;64
+		star-off;41;576;640;64;64
+		star;41;640;640;64;64
+		step-back;41;704;640;64;64
+		step-forward;41;768;640;64;64
+		stethoscope;41;832;640;64;64
+		sticker;41;896;640;64;64
+		sticky-note;41;960;640;64;64
+		store;41;0;704;64;64
+		stretch-horizontal;41;64;704;64;64
+		stretch-vertical;41;128;704;64;64
+		strikethrough;41;192;704;64;64
+		subscript;41;256;704;64;64
+		sun-dim;41;320;704;64;64
+		sun-medium;41;384;704;64;64
+		sun-moon;41;448;704;64;64
+		sun-snow;41;512;704;64;64
+		sun;41;576;704;64;64
+		sunrise;41;640;704;64;64
+		sunset;41;704;704;64;64
+		superscript;41;768;704;64;64
+		swatch-book;41;832;704;64;64
+		swiss-franc;41;896;704;64;64
+		switch-camera;41;960;704;64;64
+		sword;41;0;768;64;64
+		swords;41;64;768;64;64
+		syringe;41;128;768;64;64
+		table-2;41;192;768;64;64
+		table-cells-merge;41;256;768;64;64
+		table-cells-split;41;320;768;64;64
+		table-columns-split;41;384;768;64;64
+		table-of-contents;41;448;768;64;64
+		table-properties;41;512;768;64;64
+		table-rows-split;41;576;768;64;64
+		table;41;640;768;64;64
+		tablet-smartphone;41;704;768;64;64
+		tablet;41;768;768;64;64
+		tablets;41;832;768;64;64
+		tag;41;896;768;64;64
+		tags;41;960;768;64;64
+		tally-1;41;0;832;64;64
+		tally-2;41;64;832;64;64
+		tally-3;41;128;832;64;64
+		tally-4;41;192;832;64;64
+		tally-5;41;256;832;64;64
+		tangent;41;320;832;64;64
+		target;41;384;832;64;64
+		telescope;41;448;832;64;64
+		tent-tree;41;512;832;64;64
+		tent;41;576;832;64;64
+		terminal;41;640;832;64;64
+		test-tube-diagonal;41;704;832;64;64
+		test-tube;41;768;832;64;64
+		test-tubes;41;832;832;64;64
+		text-cursor-input;41;896;832;64;64
+		text-cursor;41;960;832;64;64
+		text-quote;41;0;896;64;64
+		text-search;41;64;896;64;64
+		text-select;41;128;896;64;64
+		text;41;192;896;64;64
+		theater;41;256;896;64;64
+		thermometer-snowflake;41;320;896;64;64
+		thermometer-sun;41;384;896;64;64
+		thermometer;41;448;896;64;64
+		thumbs-down;41;512;896;64;64
+		thumbs-up;41;576;896;64;64
+		ticket-check;41;640;896;64;64
+		ticket-minus;41;704;896;64;64
+		ticket-percent;41;768;896;64;64
+		ticket-plus;41;832;896;64;64
+		ticket-slash;41;896;896;64;64
+		ticket-x;41;960;896;64;64
+		ticket;41;0;960;64;64
+		tickets-plane;41;64;960;64;64
+		tickets;41;128;960;64;64
+		timer-off;41;192;960;64;64
+		timer-reset;41;256;960;64;64
+		timer;41;320;960;64;64
+		toggle-left;41;384;960;64;64
+		toggle-right;41;448;960;64;64
+		toilet;41;512;960;64;64
+		tornado;41;576;960;64;64
+		torus;41;640;960;64;64
+		touchpad-off;41;704;960;64;64
+		touchpad;41;768;960;64;64
+		tower-control;41;832;960;64;64
+		toy-brick;41;896;960;64;64
+		tractor;41;960;960;64;64
+		traffic-cone;42;0;0;64;64
+		train-front-tunnel;42;64;0;64;64
+		train-front;42;128;0;64;64
+		train-track;42;192;0;64;64
+		tram-front;42;256;0;64;64
+		trash-2;42;320;0;64;64
+		trash;42;384;0;64;64
+		tree-deciduous;42;448;0;64;64
+		tree-palm;42;512;0;64;64
+		tree-pine;42;576;0;64;64
+		trees;42;640;0;64;64
+		trello;42;704;0;64;64
+		trending-down;42;768;0;64;64
+		trending-up-down;42;832;0;64;64
+		trending-up;42;896;0;64;64
+		triangle-alert;42;960;0;64;64
+		triangle-right;42;0;64;64;64
+		triangle;42;64;64;64;64
+		trophy;42;128;64;64;64
+		truck;42;192;64;64;64
+		turtle;42;256;64;64;64
+		tv-minimal-play;42;320;64;64;64
+		tv-minimal;42;384;64;64;64
+		tv;42;448;64;64;64
+		twitch;42;512;64;64;64
+		twitter;42;576;64;64;64
+		type-outline;42;640;64;64;64
+		type;42;704;64;64;64
+		umbrella-off;42;768;64;64;64
+		umbrella;42;832;64;64;64
+		underline;42;896;64;64;64
+		undo-2;42;960;64;64;64
+		undo-dot;42;0;128;64;64
+		undo;42;64;128;64;64
+		unfold-horizontal;42;128;128;64;64
+		unfold-vertical;42;192;128;64;64
+		ungroup;42;256;128;64;64
+		university;42;320;128;64;64
+		unlink-2;42;384;128;64;64
+		unlink;42;448;128;64;64
+		unplug;42;512;128;64;64
+		upload;42;576;128;64;64
+		usb;42;640;128;64;64
+		user-check;42;704;128;64;64
+		user-cog;42;768;128;64;64
+		user-minus;42;832;128;64;64
+		user-pen;42;896;128;64;64
+		user-plus;42;960;128;64;64
+		user-round-check;42;0;192;64;64
+		user-round-cog;42;64;192;64;64
+		user-round-minus;42;128;192;64;64
+		user-round-pen;42;192;192;64;64
+		user-round-plus;42;256;192;64;64
+		user-round-search;42;320;192;64;64
+		user-round-x;42;384;192;64;64
+		user-round;42;448;192;64;64
+		user-search;42;512;192;64;64
+		user-x;42;576;192;64;64
+		user;42;640;192;64;64
+		users-round;42;704;192;64;64
+		users;42;768;192;64;64
+		utensils-crossed;42;832;192;64;64
+		utensils;42;896;192;64;64
+		utility-pole;42;960;192;64;64
+		variable;42;0;256;64;64
+		vault;42;64;256;64;64
+		vegan;42;128;256;64;64
+		venetian-mask;42;192;256;64;64
+		vibrate-off;42;256;256;64;64
+		vibrate;42;320;256;64;64
+		video-off;42;384;256;64;64
+		video;42;448;256;64;64
+		videotape;42;512;256;64;64
+		view;42;576;256;64;64
+		voicemail;42;640;256;64;64
+		volleyball;42;704;256;64;64
+		volume-1;42;768;256;64;64
+		volume-2;42;832;256;64;64
+		volume-off;42;896;256;64;64
+		volume-x;42;960;256;64;64
+		volume;42;0;320;64;64
+		vote;42;64;320;64;64
+		wallet-cards;42;128;320;64;64
+		wallet-minimal;42;192;320;64;64
+		wallet;42;256;320;64;64
+		wallpaper;42;320;320;64;64
+		wand-sparkles;42;384;320;64;64
+		wand;42;448;320;64;64
+		warehouse;42;512;320;64;64
+		washing-machine;42;576;320;64;64
+		watch;42;640;320;64;64
+		waves-ladder;42;704;320;64;64
+		waves;42;768;320;64;64
+		waypoints;42;832;320;64;64
+		webcam;42;896;320;64;64
+		webhook-off;42;960;320;64;64
+		webhook;42;0;384;64;64
+		weight;42;64;384;64;64
+		wheat-off;42;128;384;64;64
+		wheat;42;192;384;64;64
+		whole-word;42;256;384;64;64
+		wifi-high;42;320;384;64;64
+		wifi-low;42;384;384;64;64
+		wifi-off;42;448;384;64;64
+		wifi-zero;42;512;384;64;64
+		wifi;42;576;384;64;64
+		wind-arrow-down;42;640;384;64;64
+		wind;42;704;384;64;64
+		wine-off;42;768;384;64;64
+		wine;42;832;384;64;64
+		workflow;42;896;384;64;64
+		worm;42;960;384;64;64
+		wrap-text;42;0;448;64;64
+		wrench;42;64;448;64;64
+		x;42;128;448;64;64
+		youtube;42;192;448;64;64
+		zap-off;42;256;448;64;64
+		zap;42;320;448;64;64
+		zoom-in;42;384;448;64;64
+		zoom-out;42;448;448;64;64
+		]=]
+		local icons = {}
+		for name, atlas, x, y, width, height in data:gmatch("([^;\n]+);(%d+);(%d+);(%d+);(%d+);(%d+)\n") do
+		    name = name:match("^%s*(.-)%s*$")
+		    icons[name] = {Image=atlases[tonumber(atlas)], ImageRectOffset=Vector2.new(tonumber(x), tonumber(y)), ImageRectSize=Vector2.new(tonumber(width), tonumber(height))}
+		end
+		return icons
+	end,
+	-- Module: MainModule/IconProvider
+	[61] = function()
+		local __context, script, require = getModuleContext(61)
+		-- Legacy individual images and Renewed's cropped Lucide/Phosphor atlases.
+		local legacy = require(script.Parent.Icons).assets
+		local renewed = require(script.Parent.RenewedIcons)
+		local Provider = {}
+		function Provider:GetIcon(name)
+		    if type(name) == "table" and type(name.Image) == "string" then return name end
+		    if type(name) == "number" then name = "rbxassetid://" .. name end
+		    if type(name) ~= "string" or name == "" then return nil end
+		    local short = name:gsub("^lucide%-", "")
+		    local image = legacy["lucide-" .. short]
+		    if image then return {Image=image, ImageRectOffset=Vector2.new(0,0), ImageRectSize=Vector2.new(0,0)} end
+		    local atlas = renewed[name] or renewed[short]
+		    if atlas then return atlas end
+		    if name:match("^rbxasset") or name:match("^https?://") then
+		        return {Image=name, ImageRectOffset=Vector2.new(0,0), ImageRectSize=Vector2.new(0,0)}
+		    end
+		    return nil
+		end
+		function Provider:SetIcon(object, name)
+		    local data = self:GetIcon(name)
+		    if not data then return false end
+		    object.Image = data.Image
+		    object.ImageRectSize = data.ImageRectSize or Vector2.new(0,0)
+		    object.ImageRectOffset = data.ImageRectOffset or Vector2.new(0,0)
+		    return true
+		end
+		return setmetatable(Provider, { __index=function(self, name) return self:GetIcon(name) end })
+	end,
+	-- Module: MainModule/RenewedThemes
+	[62] = function()
+		local __context, script, require = getModuleContext(62)
+		-- Imported from Fluent Renewed (ActualMasterOogway), MIT.
+		--[[
+		MIT License 
+
+		Copyright (c) 2024-present ActualMasterOogway
+
+		Permission is hereby granted, free of charge, to any person obtaining a copy
+		of this software and associated documentation files (the "Software"), to deal
+		in the Software without restriction, including without limitation the rights
+		to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+		copies of the Software, and to permit persons to whom the Software is
+		furnished to do so, subject to the following conditions:
+
+		The above copyright notice and this permission notice shall be included in all
+		copies or substantial portions of the Software.
+
+		THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+		IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+		FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+		AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+		LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+		OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+		SOFTWARE.
+		]]
+		local themes = {Names={"Vynixu", "Dark", "Darker", "Light", "Quiet Light", "Aqua", "Tomorrow Night Blue", "Abyss", "Amethyst", "Amethyst Dark", "Rose", "Yaru", "United Ubuntu", "Elementary", "Yaru Dark", "United GNOME", "Arc Dark", "Ambiance", "Adapta Nokto", "Monokai", "Monokai Classic", "Monokai Vibrant", "Monokai Dimmed", "Typewriter", "Dark Typewriter", "Kimbie Dark", "Solarized Dark", "Solarized Light", "DuoTone Dark Sea", "DuoTone Dark Sky", "DuoTone Dark Space", "DuoTone Dark Forest", "DuoTone Dark Earth", "VSC Dark+", "VSC Dark Modern", "VSC Dark High Contrast", "VSC Light+", "VSC Light Modern", "VSC Light High Contrast", "VSC Red", "VS Dark", "VS Light", "GitHub Dark", "GitHub Dark Dimmed", "GitHub Dark Default", "GitHub Dark High Contrast", "GitHub Dark Colorblind", "GitHub Light", "GitHub Light Default", "GitHub Light High Contrast", "GitHub Light Colorblind", "Viow Arabian", "Viow Arabian Mix", "Viow Darker", "Viow Flat", "Viow Light", "Viow Mars", "Viow Neon"}}
+		themes["Vynixu"] = {
+			Accent = Color3.fromRGB(90, 235, 45),
+
+			AcrylicMain = Color3.fromRGB(30, 30, 30),
+			AcrylicBorder = Color3.fromRGB(60, 60, 60),
+			AcrylicGradient = ColorSequence.new(Color3.fromRGB(25, 25, 25), Color3.fromRGB(15, 15, 15)),
+			AcrylicNoise = 0.94,
+
+			TitleBarLine = Color3.fromRGB(65, 65, 65),
+			Tab = Color3.fromRGB(100, 100, 100),
+
+			Element = Color3.fromRGB(70, 70, 70),
+			ElementBorder = Color3.fromRGB(25, 25, 25),
+			InElementBorder = Color3.fromRGB(55, 55, 55),
+			ElementTransparency = 0.82,
+
+			DropdownFrame = Color3.fromRGB(120, 120, 120),
+			DropdownHolder = Color3.fromRGB(35, 35, 35),
+			DropdownBorder = Color3.fromRGB(25, 25, 25),
+
+			Dialog = Color3.fromRGB(35, 35, 35),
+			DialogHolder = Color3.fromRGB(25, 25, 25),
+			DialogHolderLine = Color3.fromRGB(20, 20, 20),
+			DialogButton = Color3.fromRGB(35, 35, 35),
+			DialogButtonBorder = Color3.fromRGB(55, 55, 55),
+			DialogBorder = Color3.fromRGB(50, 50, 50),
+			DialogInput = Color3.fromRGB(45, 45, 45),
+			DialogInputLine = Color3.fromRGB(120, 120, 120)
+		}
+		themes["Dark"] = {
+			Accent = Color3.fromRGB(96, 205, 255),
+
+			AcrylicMain = Color3.fromRGB(60, 60, 60),
+			AcrylicBorder = Color3.fromRGB(90, 90, 90),
+			AcrylicGradient = ColorSequence.new(Color3.fromRGB(40, 40, 40), Color3.fromRGB(40, 40, 40)),
+			AcrylicNoise = 0.9,
+
+			TitleBarLine = Color3.fromRGB(75, 75, 75),
+			Tab = Color3.fromRGB(120, 120, 120),
+
+			Element = Color3.fromRGB(120, 120, 120),
+			ElementBorder = Color3.fromRGB(35, 35, 35),
+			InElementBorder = Color3.fromRGB(90, 90, 90),
+			ElementTransparency = 0.87,
+
+			ToggleSlider = Color3.fromRGB(120, 120, 120),
+			ToggleToggled = Color3.fromRGB(0, 0, 0),
+
+			SliderRail = Color3.fromRGB(120, 120, 120),
+
+			DropdownFrame = Color3.fromRGB(160, 160, 160),
+			DropdownHolder = Color3.fromRGB(45, 45, 45),
+			DropdownBorder = Color3.fromRGB(35, 35, 35),
+			DropdownOption = Color3.fromRGB(120, 120, 120),
+
+			Keybind = Color3.fromRGB(120, 120, 120),
+
+			Input = Color3.fromRGB(160, 160, 160),
+			InputFocused = Color3.fromRGB(10, 10, 10),
+			InputIndicator = Color3.fromRGB(150, 150, 150),
+
+			Dialog = Color3.fromRGB(45, 45, 45),
+			DialogHolder = Color3.fromRGB(35, 35, 35),
+			DialogHolderLine = Color3.fromRGB(30, 30, 30),
+			DialogButton = Color3.fromRGB(45, 45, 45),
+			DialogButtonBorder = Color3.fromRGB(80, 80, 80),
+			DialogBorder = Color3.fromRGB(70, 70, 70),
+			DialogInput = Color3.fromRGB(55, 55, 55),
+			DialogInputLine = Color3.fromRGB(160, 160, 160),
+
+			Text = Color3.fromRGB(240, 240, 240),
+			SubText = Color3.fromRGB(170, 170, 170),
+			Hover = Color3.fromRGB(120, 120, 120),
+			HoverChange = 0.07
+		}
+		themes["Darker"] = {
+			Accent = Color3.fromRGB(72, 138, 182),
+
+			AcrylicMain = Color3.fromRGB(30, 30, 30),
+			AcrylicBorder = Color3.fromRGB(60, 60, 60),
+			AcrylicGradient = ColorSequence.new(Color3.fromRGB(25, 25, 25), Color3.fromRGB(15, 15, 15)),
+			AcrylicNoise = 0.94,
+
+			TitleBarLine = Color3.fromRGB(65, 65, 65),
+			Tab = Color3.fromRGB(100, 100, 100),
+
+			Element = Color3.fromRGB(70, 70, 70),
+			ElementBorder = Color3.fromRGB(25, 25, 25),
+			InElementBorder = Color3.fromRGB(55, 55, 55),
+			ElementTransparency = 0.82,
+
+			DropdownFrame = Color3.fromRGB(120, 120, 120),
+			DropdownHolder = Color3.fromRGB(35, 35, 35),
+			DropdownBorder = Color3.fromRGB(25, 25, 25),
+
+			Dialog = Color3.fromRGB(35, 35, 35),
+			DialogHolder = Color3.fromRGB(25, 25, 25),
+			DialogHolderLine = Color3.fromRGB(20, 20, 20),
+			DialogButton = Color3.fromRGB(35, 35, 35),
+			DialogButtonBorder = Color3.fromRGB(55, 55, 55),
+			DialogBorder = Color3.fromRGB(50, 50, 50),
+			DialogInput = Color3.fromRGB(45, 45, 45),
+			DialogInputLine = Color3.fromRGB(120, 120, 120)
+		}
+		themes["Light"] = {
+			Accent = Color3.fromRGB(0, 103, 192),
+
+			AcrylicMain = Color3.fromRGB(200, 200, 200),
+			AcrylicBorder = Color3.fromRGB(120, 120, 120),
+			AcrylicGradient = ColorSequence.new(Color3.fromRGB(255, 255, 255), Color3.fromRGB(255, 255, 255)),
+			AcrylicNoise = 0.96,
+
+			TitleBarLine = Color3.fromRGB(160, 160, 160),
+			Tab = Color3.fromRGB(90, 90, 90),
+
+			Element = Color3.fromRGB(255, 255, 255),
+			ElementBorder = Color3.fromRGB(180, 180, 180),
+			InElementBorder = Color3.fromRGB(150, 150, 150),
+			ElementTransparency = 0.65,
+
+			ToggleSlider = Color3.fromRGB(40, 40, 40),
+			ToggleToggled = Color3.fromRGB(255, 255, 255),
+
+			SliderRail = Color3.fromRGB(40, 40, 40),
+
+			DropdownFrame = Color3.fromRGB(200, 200, 200),
+			DropdownHolder = Color3.fromRGB(240, 240, 240),
+			DropdownBorder = Color3.fromRGB(200, 200, 200),
+			DropdownOption = Color3.fromRGB(150, 150, 150),
+
+			Keybind = Color3.fromRGB(120, 120, 120),
+
+			Input = Color3.fromRGB(200, 200, 200),
+			InputFocused = Color3.fromRGB(100, 100, 100),
+			InputIndicator = Color3.fromRGB(80, 80, 80),
+
+			Dialog = Color3.fromRGB(255, 255, 255),
+			DialogHolder = Color3.fromRGB(240, 240, 240),
+			DialogHolderLine = Color3.fromRGB(228, 228, 228),
+			DialogButton = Color3.fromRGB(255, 255, 255),
+			DialogButtonBorder = Color3.fromRGB(190, 190, 190),
+			DialogBorder = Color3.fromRGB(140, 140, 140),
+			DialogInput = Color3.fromRGB(250, 250, 250),
+			DialogInputLine = Color3.fromRGB(160, 160, 160),
+
+			Text = Color3.fromRGB(41, 41, 41),
+			SubText = Color3.fromRGB(40, 40, 40),
+			Hover = Color3.fromRGB(50, 50, 50),
+			HoverChange = 0.16
+		}
+		themes["Quiet Light"] = {
+		    Accent = Color3.fromHex("#9769dc"), -- focusBorder
+
+		    AcrylicMain = Color3.fromHex("#F5F5F5"), -- editor.background
+		    AcrylicBorder = Color3.fromHex("#c4b7d7"), -- titleBar.activeBackground
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#F5F5F5"), Color3.fromHex("#F5F5F5")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#c4b7d7"), -- titleBar.activeBackground
+		    Tab = Color3.fromHex("#705697"), -- activityBar.foreground
+
+		    Element = Color3.fromHex("#F2F2F2"), -- sideBar.background
+		    ElementBorder = Color3.fromHex("#adafb7"), -- inputOption.activeBorder
+		    InElementBorder = Color3.fromHex("#9769dc"), -- focusBorder
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#705697"), -- activityBarBadge.background
+		    ToggleToggled = Color3.fromHex("#F5F5F5"), -- editor.background
+
+		    SliderRail = Color3.fromHex("#705697"), -- activityBarBadge.background
+
+		    DropdownFrame = Color3.fromHex("#F5F5F5"), -- dropdown.background
+		    DropdownHolder = Color3.fromHex("#F5F5F5"), -- dropdown.background
+		    DropdownBorder = Color3.fromHex("#adafb7"), -- inputOption.activeBorder
+		    DropdownOption = Color3.fromHex("#333333"), -- Default text color
+
+		    Keybind = Color3.fromHex("#F5F5F5"), -- editor.background
+
+		    Input = Color3.fromHex("#F5F5F5"), -- editor.background
+		    InputFocused = Color3.fromHex("#F5F5F5"), -- editor.background
+		    InputIndicator = Color3.fromHex("#AAAAAA"), -- editorWhitespace.foreground
+
+		    Dialog = Color3.fromHex("#F2F8FC"), -- peekViewEditor.background
+		    DialogHolder = Color3.fromHex("#F2F8FC"), -- peekViewResult.background
+		    DialogHolderLine = Color3.fromHex("#705697"), -- peekView.border
+		    DialogButton = Color3.fromHex("#F5F5F5"), -- editor.background
+		    DialogButtonBorder = Color3.fromHex("#adafb7"), -- inputOption.activeBorder
+		    DialogBorder = Color3.fromHex("#705697"), -- peekView.border
+		    DialogInput = Color3.fromHex("#F5F5F5"), -- editor.background
+		    DialogInputLine = Color3.fromHex("#9769dc"), -- focusBorder
+
+		    Text = Color3.fromHex("#333333"), -- Default foreground
+		    SubText = Color3.fromHex("#6D705B"), -- editorLineNumber.foreground
+		    Hover = Color3.fromHex("#e0e0e0"), -- list.hoverBackground
+		    HoverChange = 0.1
+		}
+		themes["Aqua"] = {
+			Accent = Color3.fromRGB(60, 165, 165),
+
+			AcrylicMain = Color3.fromRGB(20, 20, 20),
+			AcrylicBorder = Color3.fromRGB(50, 100, 100),
+			AcrylicGradient = ColorSequence.new(Color3.fromRGB(60, 140, 140), Color3.fromRGB(40, 80, 80)),
+			AcrylicNoise = 0.92,
+
+			TitleBarLine = Color3.fromRGB(60, 120, 120),
+			Tab = Color3.fromRGB(140, 180, 180),
+
+			Element = Color3.fromRGB(110, 160, 160),
+			ElementBorder = Color3.fromRGB(40, 70, 70),
+			InElementBorder = Color3.fromRGB(80, 110, 110),
+			ElementTransparency = 0.84,
+
+			ToggleSlider = Color3.fromRGB(110, 160, 160),
+			ToggleToggled = Color3.fromRGB(0, 0, 0),
+
+			SliderRail = Color3.fromRGB(110, 160, 160),
+
+			DropdownFrame = Color3.fromRGB(160, 200, 200),
+			DropdownHolder = Color3.fromRGB(40, 80, 80),
+			DropdownBorder = Color3.fromRGB(40, 65, 65),
+			DropdownOption = Color3.fromRGB(110, 160, 160),
+
+			Keybind = Color3.fromRGB(110, 160, 160),
+
+			Input = Color3.fromRGB(110, 160, 160),
+			InputFocused = Color3.fromRGB(20, 10, 30),
+			InputIndicator = Color3.fromRGB(130, 170, 170),
+
+			Dialog = Color3.fromRGB(40, 80, 80),
+			DialogHolder = Color3.fromRGB(30, 60, 60),
+			DialogHolderLine = Color3.fromRGB(25, 50, 50),
+			DialogButton = Color3.fromRGB(40, 80, 80),
+			DialogButtonBorder = Color3.fromRGB(80, 110, 110),
+			DialogBorder = Color3.fromRGB(50, 100, 100),
+			DialogInput = Color3.fromRGB(45, 90, 90),
+			DialogInputLine = Color3.fromRGB(130, 170, 170),
+
+			Text = Color3.fromRGB(240, 240, 240),
+			SubText = Color3.fromRGB(170, 170, 170),
+			Hover = Color3.fromRGB(110, 160, 160),
+			HoverChange = 0.04
+		}
+		themes["Tomorrow Night Blue"] = {
+		    Accent = Color3.fromHex("#bbdaff"), -- focusBorder
+
+		    AcrylicMain = Color3.fromHex("#002451"), -- editor.background
+		    AcrylicBorder = Color3.fromHex("#404f7d"), -- editorGroup.border
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#002451"), Color3.fromHex("#002451")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#404f7d"), -- editorGroup.border
+		    Tab = Color3.fromHex("#ffffff"), -- editor.foreground
+
+		    Element = Color3.fromHex("#001733"), -- input.background
+		    ElementBorder = Color3.fromHex("#404f7d"), -- editorGroup.border
+		    InElementBorder = Color3.fromHex("#bbdaff"), -- focusBorder
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#bbdaff"), -- focusBorder
+		    ToggleToggled = Color3.fromHex("#001733"), -- input.background
+
+		    SliderRail = Color3.fromHex("#bbdaff"), -- focusBorder
+
+		    DropdownFrame = Color3.fromHex("#001733"), -- dropdown.background
+		    DropdownHolder = Color3.fromHex("#001733"), -- dropdown.background
+		    DropdownBorder = Color3.fromHex("#404f7d"), -- editorGroup.border
+		    DropdownOption = Color3.fromHex("#ffffff"), -- editor.foreground
+
+		    Keybind = Color3.fromHex("#001733"), -- input.background
+
+		    Input = Color3.fromHex("#001733"), -- input.background
+		    InputFocused = Color3.fromHex("#001733"), -- input.background
+		    InputIndicator = Color3.fromHex("#404f7d"), -- editorWhitespace.foreground
+
+		    Dialog = Color3.fromHex("#001c40"), -- editorWidget.background
+		    DialogHolder = Color3.fromHex("#001c40"), -- editorWidget.background
+		    DialogHolderLine = Color3.fromHex("#404f7d"), -- editorGroup.border
+		    DialogButton = Color3.fromHex("#001733"), -- input.background
+		    DialogButtonBorder = Color3.fromHex("#404f7d"), -- editorGroup.border
+		    DialogBorder = Color3.fromHex("#ffffff"), -- editorHoverWidget.border
+		    DialogInput = Color3.fromHex("#001733"), -- input.background
+		    DialogInputLine = Color3.fromHex("#bbdaff"), -- focusBorder
+
+		    Text = Color3.fromHex("#ffffff"), -- editor.foreground
+		    SubText = Color3.fromHex("#7285B7"), -- Comment color from tokenColors
+		    Hover = Color3.fromHex("#ffffff"), -- list.hoverBackground
+		    HoverChange = 0.1
+		}
+		themes["Abyss"] = {
+		    Accent = Color3.fromRGB(102, 136, 204), -- #6688cc
+
+		    AcrylicMain = Color3.fromRGB(0, 12, 24), -- #000c18
+		    AcrylicBorder = Color3.fromRGB(43, 43, 74), -- #2b2b4a
+		    AcrylicGradient = ColorSequence.new(Color3.fromRGB(0, 12, 24), Color3.fromRGB(0, 12, 24)),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromRGB(43, 43, 74), -- #2b2b4a
+		    Tab = Color3.fromRGB(128, 162, 194), -- #80a2c2
+
+		    Element = Color3.fromRGB(24, 31, 47), -- #181f2f
+		    ElementBorder = Color3.fromRGB(43, 43, 74), -- #2b2b4a
+		    InElementBorder = Color3.fromRGB(0, 99, 165), -- #0063a5
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromRGB(0, 99, 165), -- #0063a5
+		    ToggleToggled = Color3.fromRGB(24, 31, 47), -- #181f2f
+
+		    SliderRail = Color3.fromRGB(0, 99, 165), -- #0063a5
+
+		    DropdownFrame = Color3.fromRGB(24, 31, 47), -- #181f2f
+		    DropdownHolder = Color3.fromRGB(24, 31, 47), -- #181f2f
+		    DropdownBorder = Color3.fromRGB(43, 43, 74), -- #2b2b4a
+		    DropdownOption = Color3.fromRGB(102, 136, 204), -- #6688cc
+
+		    Keybind = Color3.fromRGB(24, 31, 47), -- #181f2f
+
+		    Input = Color3.fromRGB(24, 31, 47), -- #181f2f
+		    InputFocused = Color3.fromRGB(24, 31, 47), -- #181f2f
+		    InputIndicator = Color3.fromRGB(64, 99, 133), -- #406385
+
+		    Dialog = Color3.fromRGB(38, 38, 65), -- #262641
+		    DialogHolder = Color3.fromRGB(6, 6, 33), -- #060621
+		    DialogHolderLine = Color3.fromRGB(43, 43, 74), -- #2b2b4a
+		    DialogButton = Color3.fromRGB(24, 31, 47), -- #181f2f
+		    DialogButtonBorder = Color3.fromRGB(43, 43, 74), -- #2b2b4a
+		    DialogBorder = Color3.fromRGB(43, 43, 74), -- #2b2b4a
+		    DialogInput = Color3.fromRGB(24, 31, 47), -- #181f2f
+		    DialogInputLine = Color3.fromRGB(0, 99, 165), -- #0063a5
+
+		    Text = Color3.fromRGB(102, 136, 204), -- #6688cc
+		    SubText = Color3.fromRGB(64, 99, 133), -- #406385
+		    Hover = Color3.fromRGB(8, 40, 107), -- #08286b
+		    HoverChange = 0.1
+		}
+		themes["Amethyst"] = {
+			Accent = Color3.fromRGB(97, 62, 167),
+
+			AcrylicMain = Color3.fromRGB(20, 20, 20),
+			AcrylicBorder = Color3.fromRGB(110, 90, 130),
+			AcrylicGradient = ColorSequence.new(Color3.fromRGB(85, 57, 139), Color3.fromRGB(40, 25, 65)),
+			AcrylicNoise = 0.92,
+
+			TitleBarLine = Color3.fromRGB(95, 75, 110),
+			Tab = Color3.fromRGB(160, 140, 180),
+
+			Element = Color3.fromRGB(140, 120, 160),
+			ElementBorder = Color3.fromRGB(60, 50, 70),
+			InElementBorder = Color3.fromRGB(100, 90, 110),
+			ElementTransparency = 0.87,
+
+			ToggleSlider = Color3.fromRGB(140, 120, 160),
+			ToggleToggled = Color3.fromRGB(0, 0, 0),
+
+			SliderRail = Color3.fromRGB(140, 120, 160),
+
+			DropdownFrame = Color3.fromRGB(170, 160, 200),
+			DropdownHolder = Color3.fromRGB(60, 45, 80),
+			DropdownBorder = Color3.fromRGB(50, 40, 65),
+			DropdownOption = Color3.fromRGB(140, 120, 160),
+
+			Keybind = Color3.fromRGB(140, 120, 160),
+
+			Input = Color3.fromRGB(140, 120, 160),
+			InputFocused = Color3.fromRGB(20, 10, 30),
+			InputIndicator = Color3.fromRGB(170, 150, 190),
+
+			Dialog = Color3.fromRGB(60, 45, 80),
+			DialogHolder = Color3.fromRGB(45, 30, 65),
+			DialogHolderLine = Color3.fromRGB(40, 25, 60),
+			DialogButton = Color3.fromRGB(60, 45, 80),
+			DialogButtonBorder = Color3.fromRGB(95, 80, 110),
+			DialogBorder = Color3.fromRGB(85, 70, 100),
+			DialogInput = Color3.fromRGB(70, 55, 85),
+			DialogInputLine = Color3.fromRGB(175, 160, 190),
+
+			Text = Color3.fromRGB(240, 240, 240),
+			SubText = Color3.fromRGB(170, 170, 170),
+			Hover = Color3.fromRGB(140, 120, 160),
+			HoverChange = 0.04
+		}
+		themes["Amethyst Dark"] = {
+		    Accent = Color3.fromHex("#b133ff"),
+
+		    AcrylicMain = Color3.fromHex("#120024"),
+		    AcrylicBorder = Color3.fromHex("#4d057b"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#120024"), Color3.fromHex("#120024")),
+		    AcrylicNoise = 0.92,
+
+		    TitleBarLine = Color3.fromHex("#4d057b"),
+		    Tab = Color3.fromHex("#e9d9f2"),
+
+		    Element = Color3.fromHex("#25013c"),
+		    ElementBorder = Color3.fromHex("#4d057b"),
+		    InElementBorder = Color3.fromHex("#b133ff"),
+		    ElementTransparency = 0.85,
+
+		    ToggleSlider = Color3.fromHex("#7d16bf"),
+		    ToggleToggled = Color3.fromHex("#120024"),
+
+		    SliderRail = Color3.fromHex("#7d16bf"),
+
+		    DropdownFrame = Color3.fromHex("#25013c"),
+		    DropdownHolder = Color3.fromHex("#25013c"),
+		    DropdownBorder = Color3.fromHex("#4d057b"),
+		    DropdownOption = Color3.fromHex("#e9d9f2"),
+
+		    Keybind = Color3.fromHex("#25013c"),
+
+		    Input = Color3.fromHex("#180030"),
+		    InputFocused = Color3.fromHex("#180030"),
+		    InputIndicator = Color3.fromHex("#9e85ad"),
+
+		    Dialog = Color3.fromHex("#25013c"),
+		    DialogHolder = Color3.fromHex("#120024"),
+		    DialogHolderLine = Color3.fromHex("#4d057b"),
+		    DialogButton = Color3.fromHex("#25013c"),
+		    DialogButtonBorder = Color3.fromHex("#4d057b"),
+		    DialogBorder = Color3.fromHex("#4d057b"),
+		    DialogInput = Color3.fromHex("#180030"),
+		    DialogInputLine = Color3.fromHex("#b133ff"),
+
+		    Text = Color3.fromHex("#e9d9f2"),
+		    SubText = Color3.fromHex("#9e85ad"),
+		    Hover = Color3.fromHex("#4d057b"),
+		    HoverChange = 0.1
+		}
+		themes["Rose"] = {
+			Accent = Color3.fromRGB(180, 55, 90),
+
+			AcrylicMain = Color3.fromRGB(40, 40, 40),
+			AcrylicBorder = Color3.fromRGB(130, 90, 110),
+			AcrylicGradient = ColorSequence.new(Color3.fromRGB(190, 60, 135), Color3.fromRGB(165, 50, 70)),
+			AcrylicNoise = 0.92,
+
+			TitleBarLine = Color3.fromRGB(140, 85, 105),
+			Tab = Color3.fromRGB(180, 140, 160),
+
+			Element = Color3.fromRGB(200, 120, 170),
+			ElementBorder = Color3.fromRGB(110, 70, 85),
+			InElementBorder = Color3.fromRGB(120, 90, 90),
+			ElementTransparency = 0.86,
+
+			ToggleSlider = Color3.fromRGB(200, 120, 170),
+			ToggleToggled = Color3.fromRGB(0, 0, 0),
+
+			SliderRail = Color3.fromRGB(200, 120, 170),
+
+			DropdownFrame = Color3.fromRGB(200, 160, 180),
+			DropdownHolder = Color3.fromRGB(120, 50, 75),
+			DropdownBorder = Color3.fromRGB(90, 40, 55),
+			DropdownOption = Color3.fromRGB(200, 120, 170),
+
+			Keybind = Color3.fromRGB(200, 120, 170),
+
+			Input = Color3.fromRGB(200, 120, 170),
+			InputFocused = Color3.fromRGB(20, 10, 30),
+			InputIndicator = Color3.fromRGB(170, 150, 190),
+
+			Dialog = Color3.fromRGB(120, 50, 75),
+			DialogHolder = Color3.fromRGB(95, 40, 60),
+			DialogHolderLine = Color3.fromRGB(90, 35, 55),
+			DialogButton = Color3.fromRGB(120, 50, 75),
+			DialogButtonBorder = Color3.fromRGB(155, 90, 115),
+			DialogBorder = Color3.fromRGB(100, 70, 90),
+			DialogInput = Color3.fromRGB(135, 55, 80),
+			DialogInputLine = Color3.fromRGB(190, 160, 180),
+
+			Text = Color3.fromRGB(240, 240, 240),
+			SubText = Color3.fromRGB(170, 170, 170),
+			Hover = Color3.fromRGB(200, 120, 170),
+			HoverChange = 0.04
+		}
+		themes["Yaru"] = {
+		    Accent = Color3.fromHex("#e95420"),
+
+		    AcrylicMain = Color3.fromHex("#edeef0"),
+		    AcrylicBorder = Color3.fromHex("#D4D4D4"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#edeef0"), Color3.fromHex("#edeef0")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#D4D4D4"),
+		    Tab = Color3.fromHex("#111111"),
+
+		    Element = Color3.fromHex("#FFFFFF"),
+		    ElementBorder = Color3.fromHex("#CECECE"),
+		    InElementBorder = Color3.fromHex("#e95420"),
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#e95420"),
+		    ToggleToggled = Color3.fromHex("#FFFFFF"),
+
+		    SliderRail = Color3.fromHex("#e95420"),
+
+		    DropdownFrame = Color3.fromHex("#FFFFFF"),
+		    DropdownHolder = Color3.fromHex("#FFFFFF"),
+		    DropdownBorder = Color3.fromHex("#CECECE"),
+		    DropdownOption = Color3.fromHex("#111111"),
+
+		    Keybind = Color3.fromHex("#FFFFFF"),
+
+		    Input = Color3.fromHex("#FFFFFF"),
+		    InputFocused = Color3.fromHex("#FFFFFF"),
+		    InputIndicator = Color3.fromHex("#767676"),
+
+		    Dialog = Color3.fromHex("#f6f6f6"),
+		    DialogHolder = Color3.fromHex("#FFFFFF"),
+		    DialogHolderLine = Color3.fromHex("#D4D4D4"),
+		    DialogButton = Color3.fromHex("#f6f6f6"),
+		    DialogButtonBorder = Color3.fromHex("#CECECE"),
+		    DialogBorder = Color3.fromHex("#D4D4D4"),
+		    DialogInput = Color3.fromHex("#FFFFFF"),
+		    DialogInputLine = Color3.fromHex("#e95420"),
+
+		    Text = Color3.fromHex("#111111"),
+		    SubText = Color3.fromHex("#6F6F6F"),
+		    Hover = Color3.fromHex("#E8E8E8"),
+		    HoverChange = 0.1
+		}
+		themes["United Ubuntu"] = {
+		    Accent = Color3.fromHex("#48b258"),
+
+		    AcrylicMain = Color3.fromHex("#1e1e1e"),
+		    AcrylicBorder = Color3.fromHex("#444444"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#1e1e1e"), Color3.fromHex("#1e1e1e")),
+		    AcrylicNoise = 0.92,
+
+		    TitleBarLine = Color3.fromHex("#444444"),
+		    Tab = Color3.fromHex("#dddddd"),
+
+		    Element = Color3.fromHex("#242424"),
+		    ElementBorder = Color3.fromHex("#404040"),
+		    InElementBorder = Color3.fromHex("#48b258"),
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#48b258"),
+		    ToggleToggled = Color3.fromHex("#1e1e1e"),
+
+		    SliderRail = Color3.fromHex("#48b258"),
+
+		    DropdownFrame = Color3.fromHex("#242424"),
+		    DropdownHolder = Color3.fromHex("#242424"),
+		    DropdownBorder = Color3.fromHex("#404040"),
+		    DropdownOption = Color3.fromHex("#dddddd"),
+
+		    Keybind = Color3.fromHex("#242424"),
+
+		    Input = Color3.fromHex("#242424"),
+		    InputFocused = Color3.fromHex("#242424"),
+		    InputIndicator = Color3.fromHex("#808080"),
+
+		    Dialog = Color3.fromHex("#242424"),
+		    DialogHolder = Color3.fromHex("#1e1e1e"),
+		    DialogHolderLine = Color3.fromHex("#404040"),
+		    DialogButton = Color3.fromHex("#242424"),
+		    DialogButtonBorder = Color3.fromHex("#404040"),
+		    DialogBorder = Color3.fromHex("#444444"),
+		    DialogInput = Color3.fromHex("#242424"),
+		    DialogInputLine = Color3.fromHex("#48b258"),
+
+		    Text = Color3.fromHex("#dddddd"),
+		    SubText = Color3.fromHex("#808080"),
+		    Hover = Color3.fromHex("#2A2D2E"),
+		    HoverChange = 0.05
+		}
+		themes["Elementary"] = {
+		    Accent = Color3.fromHex("#cb5226"),
+
+		    AcrylicMain = Color3.fromHex("#eff0f1"),
+		    AcrylicBorder = Color3.fromHex("#e9d18d"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#eff0f1"), Color3.fromHex("#eff0f1")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#e9d18d"),
+		    Tab = Color3.fromHex("#5e5e5e"),
+
+		    Element = Color3.fromHex("#fdf6e3"),
+		    ElementBorder = Color3.fromHex("#e9d18d"),
+		    InElementBorder = Color3.fromHex("#cb5226"),
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#cb5226"),
+		    ToggleToggled = Color3.fromHex("#fdf6e3"),
+
+		    SliderRail = Color3.fromHex("#cb5226"),
+
+		    DropdownFrame = Color3.fromHex("#fbefce"),
+		    DropdownHolder = Color3.fromHex("#fbefce"),
+		    DropdownBorder = Color3.fromHex("#e9d18d"),
+		    DropdownOption = Color3.fromHex("#5e5e5e"),
+
+		    Keybind = Color3.fromHex("#fdf6e3"),
+
+		    Input = Color3.fromHex("#fdf6e3"),
+		    InputFocused = Color3.fromHex("#fdf6e3"),
+		    InputIndicator = Color3.fromHex("#93a1a1"),
+
+		    Dialog = Color3.fromHex("#fbefce"),
+		    DialogHolder = Color3.fromHex("#fbefce"),
+		    DialogHolderLine = Color3.fromHex("#e9d18d"),
+		    DialogButton = Color3.fromHex("#fbefce"),
+		    DialogButtonBorder = Color3.fromHex("#e9d18d"),
+		    DialogBorder = Color3.fromHex("#e9d18d"),
+		    DialogInput = Color3.fromHex("#fdf6e3"),
+		    DialogInputLine = Color3.fromHex("#cb5226"),
+
+		    Text = Color3.fromHex("#5e5e5e"),
+		    SubText = Color3.fromHex("#93a1a1"),
+		    Hover = Color3.fromHex("#d6d6d6"),
+		    HoverChange = 0.1
+		}
+		themes["Yaru Dark"] = {
+		    Accent = Color3.fromHex("#e95420"),
+
+		    AcrylicMain = Color3.fromHex("#383838"),
+		    AcrylicBorder = Color3.fromHex("#444444"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#383838"), Color3.fromHex("#383838")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#444444"),
+		    Tab = Color3.fromHex("#FFFFFF"),
+
+		    Element = Color3.fromHex("#484848"),
+		    ElementBorder = Color3.fromHex("#404040"),
+		    InElementBorder = Color3.fromHex("#e95420"),
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#e95420"),
+		    ToggleToggled = Color3.fromHex("#2f2f2f"),
+
+		    SliderRail = Color3.fromHex("#e95420"),
+
+		    DropdownFrame = Color3.fromHex("#484848"),
+		    DropdownHolder = Color3.fromHex("#484848"),
+		    DropdownBorder = Color3.fromHex("#404040"),
+		    DropdownOption = Color3.fromHex("#FFFFFF"),
+
+		    Keybind = Color3.fromHex("#484848"),
+
+		    Input = Color3.fromHex("#484848"),
+		    InputFocused = Color3.fromHex("#484848"),
+		    InputIndicator = Color3.fromHex("#636e7b"),
+
+		    Dialog = Color3.fromHex("#434343"),
+		    DialogHolder = Color3.fromHex("#2f2f2f"),
+		    DialogHolderLine = Color3.fromHex("#404040"),
+		    DialogButton = Color3.fromHex("#484848"),
+		    DialogButtonBorder = Color3.fromHex("#404040"),
+		    DialogBorder = Color3.fromHex("#444444"),
+		    DialogInput = Color3.fromHex("#484848"),
+		    DialogInputLine = Color3.fromHex("#e95420"),
+
+		    Text = Color3.fromHex("#FFFFFF"),
+		    SubText = Color3.fromHex("#808080"),
+		    Hover = Color3.fromHex("#575757"),
+		    HoverChange = 0.1
+		}
+		themes["United GNOME"] = {
+		    Accent = Color3.fromHex("#48b258"),
+
+		    AcrylicMain = Color3.fromHex("#1e1e1e"),
+		    AcrylicBorder = Color3.fromHex("#444444"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#1e1e1e"), Color3.fromHex("#1e1e1e")),
+		    AcrylicNoise = 0.92,
+
+		    TitleBarLine = Color3.fromHex("#444444"),
+		    Tab = Color3.fromHex("#dddddd"),
+
+		    Element = Color3.fromHex("#242424"),
+		    ElementBorder = Color3.fromHex("#404040"),
+		    InElementBorder = Color3.fromHex("#48b258"),
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#48b258"),
+		    ToggleToggled = Color3.fromHex("#1e1e1e"),
+
+		    SliderRail = Color3.fromHex("#48b258"),
+
+		    DropdownFrame = Color3.fromHex("#242424"),
+		    DropdownHolder = Color3.fromHex("#242424"),
+		    DropdownBorder = Color3.fromHex("#404040"),
+		    DropdownOption = Color3.fromHex("#dddddd"),
+
+		    Keybind = Color3.fromHex("#242424"),
+
+		    Input = Color3.fromHex("#242424"),
+		    InputFocused = Color3.fromHex("#242424"),
+		    InputIndicator = Color3.fromHex("#808080"),
+
+		    Dialog = Color3.fromHex("#242424"),
+		    DialogHolder = Color3.fromHex("#1e1e1e"),
+		    DialogHolderLine = Color3.fromHex("#404040"),
+		    DialogButton = Color3.fromHex("#242424"),
+		    DialogButtonBorder = Color3.fromHex("#404040"),
+		    DialogBorder = Color3.fromHex("#444444"),
+		    DialogInput = Color3.fromHex("#242424"),
+		    DialogInputLine = Color3.fromHex("#48b258"),
+
+		    Text = Color3.fromHex("#dddddd"),
+		    SubText = Color3.fromHex("#808080"),
+		    Hover = Color3.fromHex("#2A2D2E"),
+		    HoverChange = 0.05
+		}
+		themes["Arc Dark"] = {
+		    Accent = Color3.fromHex("#5294e2"),
+
+		    AcrylicMain = Color3.fromHex("#383c4a"),
+		    AcrylicBorder = Color3.fromHex("#404f7d"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#383c4a"), Color3.fromHex("#383c4a")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#404f7d"),
+		    Tab = Color3.fromHex("#a2a2a2"),
+
+		    Element = Color3.fromHex("#4b5162"),
+		    ElementBorder = Color3.fromHex("#404f7d"),
+		    InElementBorder = Color3.fromHex("#5294e2"),
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#5294e2"),
+		    ToggleToggled = Color3.fromHex("#383c4a"),
+
+		    SliderRail = Color3.fromHex("#5294e2"),
+
+		    DropdownFrame = Color3.fromHex("#4b5162"),
+		    DropdownHolder = Color3.fromHex("#4b5162"),
+		    DropdownBorder = Color3.fromHex("#404f7d"),
+		    DropdownOption = Color3.fromHex("#a2a2a2"),
+
+		    Keybind = Color3.fromHex("#4b5162"),
+
+		    Input = Color3.fromHex("#4b5162"),
+		    InputFocused = Color3.fromHex("#4b5162"),
+		    InputIndicator = Color3.fromHex("#7285b7"),
+
+		    Dialog = Color3.fromHex("#434858"),
+		    DialogHolder = Color3.fromHex("#383c4a"),
+		    DialogHolderLine = Color3.fromHex("#404f7d"),
+		    DialogButton = Color3.fromHex("#4b5162"),
+		    DialogButtonBorder = Color3.fromHex("#404f7d"),
+		    DialogBorder = Color3.fromHex("#404f7d"),
+		    DialogInput = Color3.fromHex("#4b5162"),
+		    DialogInputLine = Color3.fromHex("#5294e2"),
+
+		    Text = Color3.fromHex("#a2a2a2"),
+		    SubText = Color3.fromHex("#7285b7"),
+		    Hover = Color3.fromHex("#4b5162"),
+		    HoverChange = 0.1
+		}
+		themes["Ambiance"] = {
+		    Accent = Color3.fromHex("#00BCD4"),
+
+		    AcrylicMain = Color3.fromHex("#29353b"),
+		    AcrylicBorder = Color3.fromHex("#222D32"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#29353b"), Color3.fromHex("#29353b")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#222D32"),
+		    Tab = Color3.fromHex("#EEFFFF"),
+
+		    Element = Color3.fromHex("#243035"),
+		    ElementBorder = Color3.fromHex("#222D32"),
+		    InElementBorder = Color3.fromHex("#00BCD4"),
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#00BCD4"),
+		    ToggleToggled = Color3.fromHex("#29353b"),
+
+		    SliderRail = Color3.fromHex("#00BCD4"),
+
+		    DropdownFrame = Color3.fromHex("#243035"),
+		    DropdownHolder = Color3.fromHex("#243035"),
+		    DropdownBorder = Color3.fromHex("#222D32"),
+		    DropdownOption = Color3.fromHex("#EEFFFF"),
+
+		    Keybind = Color3.fromHex("#243035"),
+
+		    Input = Color3.fromHex("#243035"),
+		    InputFocused = Color3.fromHex("#243035"),
+		    InputIndicator = Color3.fromHex("#546E7A"),
+
+		    Dialog = Color3.fromHex("#222D32"),
+		    DialogHolder = Color3.fromHex("#29353b"),
+		    DialogHolderLine = Color3.fromHex("#222D32"),
+		    DialogButton = Color3.fromHex("#243035"),
+		    DialogButtonBorder = Color3.fromHex("#222D32"),
+		    DialogBorder = Color3.fromHex("#222D32"),
+		    DialogInput = Color3.fromHex("#243035"),
+		    DialogInputLine = Color3.fromHex("#00BCD4"),
+
+		    Text = Color3.fromHex("#EEFFFF"),
+		    SubText = Color3.fromHex("#546E7A"),
+		    Hover = Color3.fromHex("#2D3B42"),
+		    HoverChange = 0.1
+		}
+		themes["Adapta Nokto"] = {
+		    Accent = Color3.fromHex("#ec6a3f"),
+
+		    AcrylicMain = Color3.fromHex("#31312e"),
+		    AcrylicBorder = Color3.fromHex("#403f3a"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#31312e"), Color3.fromHex("#31312e")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#403f3a"),
+		    Tab = Color3.fromHex("#dddddd"),
+
+		    Element = Color3.fromHex("#373633"),
+		    ElementBorder = Color3.fromHex("#403f3a"),
+		    InElementBorder = Color3.fromHex("#ec6a3f"),
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#ec6a3f"),
+		    ToggleToggled = Color3.fromHex("#31312e"),
+
+		    SliderRail = Color3.fromHex("#ec6a3f"),
+
+		    DropdownFrame = Color3.fromHex("#373633"),
+		    DropdownHolder = Color3.fromHex("#373633"),
+		    DropdownBorder = Color3.fromHex("#403f3a"),
+		    DropdownOption = Color3.fromHex("#dddddd"),
+
+		    Keybind = Color3.fromHex("#373633"),
+
+		    Input = Color3.fromHex("#373633"),
+		    InputFocused = Color3.fromHex("#373633"),
+		    InputIndicator = Color3.fromHex("#747c84"),
+
+		    Dialog = Color3.fromHex("#3c3b37"),
+		    DialogHolder = Color3.fromHex("#31312e"),
+		    DialogHolderLine = Color3.fromHex("#403f3a"),
+		    DialogButton = Color3.fromHex("#373633"),
+		    DialogButtonBorder = Color3.fromHex("#403f3a"),
+		    DialogBorder = Color3.fromHex("#403f3a"),
+		    DialogInput = Color3.fromHex("#373633"),
+		    DialogInputLine = Color3.fromHex("#ec6a3f"),
+
+		    Text = Color3.fromHex("#dddddd"),
+		    SubText = Color3.fromHex("#747c84"),
+		    Hover = Color3.fromHex("#403f3a"),
+		    HoverChange = 0.1
+		}
+		themes["Monokai"] = {
+		    Accent = Color3.fromHex("#F92672"), -- Using the keyword color as accent
+
+		    AcrylicMain = Color3.fromHex("#272822"), -- editor.background
+		    AcrylicBorder = Color3.fromHex("#414339"), -- dropdown.background
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#272822"), Color3.fromHex("#1e1f1c")), -- editor.background to editorGroupHeader.tabsBackground
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#414339"), -- dropdown.background
+		    Tab = Color3.fromHex("#f8f8f2"), -- editor.foreground
+
+		    Element = Color3.fromHex("#414339"), -- dropdown.background
+		    ElementBorder = Color3.fromHex("#75715E"), -- button.background
+		    InElementBorder = Color3.fromHex("#F92672"), -- keyword color
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#F92672"), -- keyword color
+		    ToggleToggled = Color3.fromHex("#414339"), -- dropdown.background
+
+		    SliderRail = Color3.fromHex("#75715E"), -- button.background
+
+		    DropdownFrame = Color3.fromHex("#414339"), -- dropdown.background
+		    DropdownHolder = Color3.fromHex("#1e1f1c"), -- dropdown.listBackground
+		    DropdownBorder = Color3.fromHex("#75715E"), -- button.background
+		    DropdownOption = Color3.fromHex("#f8f8f2"), -- editor.foreground
+
+		    Keybind = Color3.fromHex("#414339"), -- dropdown.background
+
+		    Input = Color3.fromHex("#414339"), -- input.background
+		    InputFocused = Color3.fromHex("#414339"), -- input.background
+		    InputIndicator = Color3.fromHex("#90908a"), -- editorLineNumber.foreground
+
+		    Dialog = Color3.fromHex("#1e1f1c"), -- menu.background
+		    DialogHolder = Color3.fromHex("#1e1f1c"), -- menu.background
+		    DialogHolderLine = Color3.fromHex("#414339"), -- dropdown.background
+		    DialogButton = Color3.fromHex("#414339"), -- dropdown.background
+		    DialogButtonBorder = Color3.fromHex("#75715E"), -- button.background
+		    DialogBorder = Color3.fromHex("#75715E"), -- button.background
+		    DialogInput = Color3.fromHex("#414339"), -- input.background
+		    DialogInputLine = Color3.fromHex("#F92672"), -- keyword color
+
+		    Text = Color3.fromHex("#f8f8f2"), -- editor.foreground
+		    SubText = Color3.fromHex("#88846f"), -- comment color
+		    Hover = Color3.fromHex("#3e3d32"), -- list.hoverBackground
+		    HoverChange = 0.1
+		}
+		themes["Monokai Classic"] = {
+		    Accent = Color3.fromHex("#75715E"), -- focusBorder
+
+		    AcrylicMain = Color3.fromHex("#272822"), -- editor.background
+		    AcrylicBorder = Color3.fromHex("#1e1f1c"), -- titleBar.activeBackground
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#272822"), Color3.fromHex("#272822")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#1e1f1c"), -- titleBar.activeBackground
+		    Tab = Color3.fromHex("#f8f8f2"), -- editor.foreground
+
+		    Element = Color3.fromHex("#414339"), -- dropdown.background
+		    ElementBorder = Color3.fromHex("#75715E"), -- button.background
+		    InElementBorder = Color3.fromHex("#75715E"), -- focusBorder
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#75715E"), -- button.background
+		    ToggleToggled = Color3.fromHex("#272822"), -- editor.background
+
+		    SliderRail = Color3.fromHex("#75715E"), -- button.background
+
+		    DropdownFrame = Color3.fromHex("#414339"), -- dropdown.background
+		    DropdownHolder = Color3.fromHex("#1e1f1c"), -- dropdown.listBackground
+		    DropdownBorder = Color3.fromHex("#75715E"), -- button.background
+		    DropdownOption = Color3.fromHex("#f8f8f2"), -- list.highlightForeground
+
+		    Keybind = Color3.fromHex("#414339"), -- dropdown.background
+
+		    Input = Color3.fromHex("#414339"), -- input.background
+		    InputFocused = Color3.fromHex("#414339"), -- input.background
+		    InputIndicator = Color3.fromHex("#90908a"), -- editorLineNumber.foreground
+
+		    Dialog = Color3.fromHex("#1e1f1c"), -- editorWidget.background
+		    DialogHolder = Color3.fromHex("#1e1f1c"), -- menu.background
+		    DialogHolderLine = Color3.fromHex("#414339"), -- panel.border
+		    DialogButton = Color3.fromHex("#414339"), -- dropdown.background
+		    DialogButtonBorder = Color3.fromHex("#75715E"), -- button.background
+		    DialogBorder = Color3.fromHex("#75715E"), -- editorHoverWidget.border
+		    DialogInput = Color3.fromHex("#414339"), -- input.background
+		    DialogInputLine = Color3.fromHex("#75715E"), -- focusBorder
+
+		    Text = Color3.fromHex("#f8f8f2"), -- editor.foreground
+		    SubText = Color3.fromHex("#88846f"), -- Comment color
+		    Hover = Color3.fromHex("#3e3d32"), -- list.hoverBackground
+		    HoverChange = 0.1
+		}
+		themes["Monokai Vibrant"] = {
+		    Accent = Color3.fromHex("#528bff"), -- activityBarBadge.background
+
+		    AcrylicMain = Color3.fromHex("#16171D"), -- editor.background
+		    AcrylicBorder = Color3.fromHex("#181A1F"), -- editorGroup.border
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#16171D"), Color3.fromHex("#16171D")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#181A1F"), -- editorGroup.border
+		    Tab = Color3.fromHex("#f8f8f0"), -- editor.foreground
+
+		    Element = Color3.fromHex("#1d1f23"), -- dropdown.background
+		    ElementBorder = Color3.fromHex("#181A11"), -- dropdown.border
+		    InElementBorder = Color3.fromHex("#528bff"), -- activityBarBadge.background
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#528bff"), -- activityBarBadge.background
+		    ToggleToggled = Color3.fromHex("#16171D"), -- editor.background
+
+		    SliderRail = Color3.fromHex("#528bff"), -- activityBarBadge.background
+
+		    DropdownFrame = Color3.fromHex("#1d1f23"), -- dropdown.background
+		    DropdownHolder = Color3.fromHex("#21252B"), -- editorGroupHeader.tabsBackground
+		    DropdownBorder = Color3.fromHex("#181A11"), -- dropdown.border
+		    DropdownOption = Color3.fromHex("#d7dae0"), -- activityBar.foreground
+
+		    Keybind = Color3.fromHex("#1d1f23"), -- input.background
+
+		    Input = Color3.fromHex("#1d1f23"), -- input.background
+		    InputFocused = Color3.fromHex("#1d1f23"), -- input.background
+		    InputIndicator = Color3.fromHex("#495162"), -- editorLineNumber.foreground
+
+		    Dialog = Color3.fromHex("#21252B"), -- editorWidget.background
+		    DialogHolder = Color3.fromHex("#21252B"), -- notifications.background
+		    DialogHolderLine = Color3.fromHex("#181A1F"), -- editorGroup.border
+		    DialogButton = Color3.fromHex("#1d1f23"), -- input.background
+		    DialogButtonBorder = Color3.fromHex("#181A11"), -- dropdown.border
+		    DialogBorder = Color3.fromHex("#181A1F"), -- editorHoverWidget.border
+		    DialogInput = Color3.fromHex("#1d1f23"), -- input.background
+		    DialogInputLine = Color3.fromHex("#528bff"), -- activityBarBadge.background
+
+		    Text = Color3.fromHex("#f8f8f0"), -- editor.foreground
+		    SubText = Color3.fromHex("#5c6370"), -- Comment color
+		    Hover = Color3.fromHex("#292d35"), -- list.hoverBackground
+		    HoverChange = 0.1
+		}
+		themes["Monokai Dimmed"] = {
+		    Accent = Color3.fromHex("#3655b5"), -- focusBorder
+
+		    AcrylicMain = Color3.fromHex("#1e1e1e"), -- editor.background
+		    AcrylicBorder = Color3.fromHex("#303030"), -- tab.border
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#1e1e1e"), Color3.fromHex("#1e1e1e")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#303030"), -- tab.border
+		    Tab = Color3.fromHex("#d8d8d8"), -- tab.inactiveForeground
+
+		    Element = Color3.fromHex("#525252"), -- dropdown.background
+		    ElementBorder = Color3.fromHex("#505050"), -- titleBar.activeBackground
+		    InElementBorder = Color3.fromHex("#3655b5"), -- focusBorder
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#3655b5"), -- focusBorder
+		    ToggleToggled = Color3.fromHex("#525252"), -- dropdown.background
+
+		    SliderRail = Color3.fromHex("#3655b5"), -- focusBorder
+
+		    DropdownFrame = Color3.fromHex("#525252"), -- dropdown.background
+		    DropdownHolder = Color3.fromHex("#525252"), -- dropdown.background
+		    DropdownBorder = Color3.fromHex("#505050"), -- titleBar.activeBackground
+		    DropdownOption = Color3.fromHex("#c5c8c6"), -- editor.foreground
+
+		    Keybind = Color3.fromHex("#525252"), -- dropdown.background
+
+		    Input = Color3.fromHex("#525252"), -- dropdown.background
+		    InputFocused = Color3.fromHex("#525252"), -- dropdown.background
+		    InputIndicator = Color3.fromHex("#949494"), -- editorLineNumber.activeForeground
+
+		    Dialog = Color3.fromHex("#272727"), -- menu.background
+		    DialogHolder = Color3.fromHex("#272727"), -- menu.background
+		    DialogHolderLine = Color3.fromHex("#505050"), -- titleBar.activeBackground
+		    DialogButton = Color3.fromHex("#565656"), -- button.background
+		    DialogButtonBorder = Color3.fromHex("#505050"), -- titleBar.activeBackground
+		    DialogBorder = Color3.fromHex("#505050"), -- titleBar.activeBackground
+		    DialogInput = Color3.fromHex("#525252"), -- dropdown.background
+		    DialogInputLine = Color3.fromHex("#3655b5"), -- focusBorder
+
+		    Text = Color3.fromHex("#c5c8c6"), -- editor.foreground
+		    SubText = Color3.fromHex("#9A9B99"), -- comment color from tokenColors
+		    Hover = Color3.fromHex("#444444"), -- list.hoverBackground
+		    HoverChange = 0.1
+		}
+		themes["Typewriter"] = {
+		    Accent = Color3.fromRGB(97, 161, 107),
+
+		    AcrylicMain = Color3.fromRGB(252, 245, 228),
+		    AcrylicBorder = Color3.fromRGB(189, 189, 189),
+		    AcrylicGradient = ColorSequence.new(Color3.fromRGB(252, 245, 228), Color3.fromRGB(228, 220, 200)),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromRGB(189, 189, 189),
+		    Tab = Color3.fromRGB(109, 180, 120),
+
+		    Element = Color3.fromRGB(255, 255, 255),
+		    ElementBorder = Color3.fromRGB(200, 200, 200),
+		    InElementBorder = Color3.fromRGB(191, 191, 193),
+		    ElementTransparency = 1,
+
+		    ToggleSlider = Color3.fromRGB(97, 161, 107),
+		    ToggleToggled = Color3.fromRGB(255, 255, 255),
+
+		    SliderRail = Color3.fromRGB(230, 230, 230),
+
+		    DropdownFrame = Color3.fromRGB(217, 218, 220),
+		    DropdownHolder = Color3.fromRGB(226, 220, 205),
+		    DropdownBorder = Color3.fromRGB(185, 182, 172),
+		    DropdownOption = Color3.fromRGB(27, 129, 229),
+
+		    Keybind = Color3.fromRGB(233, 227, 211),
+
+		    Input = Color3.fromRGB(255, 255, 255),
+		    InputFocused = Color3.fromRGB(20, 10, 30),
+		    InputIndicator = Color3.fromRGB(170, 150, 190),
+
+		    Dialog = Color3.fromRGB(252, 245, 228),
+		    DialogHolder = Color3.fromRGB(228, 220, 200),
+		    DialogHolderLine = Color3.fromRGB(189, 189, 189),
+		    DialogButton = Color3.fromRGB(242, 243, 245),
+		    DialogButtonBorder = Color3.fromRGB(213, 213, 215),
+		    DialogBorder = Color3.fromRGB(189, 189, 189),
+		    DialogInput = Color3.fromRGB(252, 245, 228),
+		    DialogInputLine = Color3.fromRGB(190, 160, 180),
+
+		    Text = Color3.fromRGB(104, 104, 104),
+		    SubText = Color3.fromRGB(170, 170, 170),
+		    Hover = Color3.fromRGB(149, 149, 149),
+		    HoverChange = 0.04
+		}
+		themes["Dark Typewriter"] = {
+		    Accent = Color3.fromRGB(109, 180, 120),
+
+		    AcrylicMain = Color3.fromRGB(38, 38, 38),
+		    AcrylicBorder = Color3.fromRGB(85, 85, 85),
+		    AcrylicGradient = ColorSequence.new(Color3.fromRGB(38, 38, 38), Color3.fromRGB(38, 38, 38)),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromRGB(189, 189, 189),
+		    Tab = Color3.fromRGB(109, 180, 120),
+
+		    Element = Color3.fromRGB(42, 42, 42),
+		    ElementBorder = Color3.fromRGB(51, 51, 51),
+		    InElementBorder = Color3.fromRGB(51, 51, 51),
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromRGB(103, 169, 113),
+		    ToggleToggled = Color3.fromRGB(255, 255, 255),
+
+		    SliderRail = Color3.fromRGB(51, 51, 51),
+
+		    DropdownFrame = Color3.fromRGB(68, 68, 68),
+		    DropdownHolder = Color3.fromRGB(68, 68, 68),
+		    DropdownBorder = Color3.fromRGB(38, 38, 38),
+		    DropdownOption = Color3.fromRGB(153, 200, 255),
+
+		    Keybind = Color3.fromRGB(54, 54, 54),
+
+		    Input = Color3.fromRGB(27, 27, 27),
+		    InputFocused = Color3.fromRGB(51, 51, 51),
+		    InputIndicator = Color3.fromRGB(197, 184, 161),
+
+		    Dialog = Color3.fromRGB(38, 38, 38),
+		    DialogHolder = Color3.fromRGB(58, 52, 46),
+		    DialogHolderLine = Color3.fromRGB(40, 40, 40),
+		    DialogButton = Color3.fromRGB(42, 42, 42),
+		    DialogButtonBorder = Color3.fromRGB(51, 51, 51),
+		    DialogBorder = Color3.fromRGB(189, 189, 189),
+		    DialogInput = Color3.fromRGB(27, 27, 27),
+		    DialogInputLine = Color3.fromRGB(197, 184, 161),
+
+		    Text = Color3.fromRGB(197, 184, 161),
+		    SubText = Color3.fromRGB(158, 158, 158),
+		    Hover = Color3.fromRGB(149, 149, 149),
+		    HoverChange = 0.04
+		}
+		themes["Kimbie Dark"] = {
+		    Accent = Color3.fromHex("#a57a4c"), -- focusBorder
+
+		    AcrylicMain = Color3.fromHex("#221a0f"), -- editor.background
+		    AcrylicBorder = Color3.fromHex("#5e452b"), -- editor.lineHighlightBackground
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#221a0f"), Color3.fromHex("#221a0f")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#51412c"), -- input.background
+		    Tab = Color3.fromHex("#d3af86"), -- editor.foreground
+
+		    Element = Color3.fromHex("#51412c"), -- input.background
+		    ElementBorder = Color3.fromHex("#5e452b"), -- peekView.border
+		    InElementBorder = Color3.fromHex("#a57a4c"), -- focusBorder
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#a57a4c"), -- focusBorder
+		    ToggleToggled = Color3.fromHex("#51412c"), -- input.background
+
+		    SliderRail = Color3.fromHex("#a57a4c"), -- focusBorder
+
+		    DropdownFrame = Color3.fromHex("#51412c"), -- dropdown.background
+		    DropdownHolder = Color3.fromHex("#51412c"), -- dropdown.background
+		    DropdownBorder = Color3.fromHex("#5e452b"), -- peekView.border
+		    DropdownOption = Color3.fromHex("#d3af86"), -- editor.foreground
+
+		    Keybind = Color3.fromHex("#51412c"), -- input.background
+
+		    Input = Color3.fromHex("#51412c"), -- input.background
+		    InputFocused = Color3.fromHex("#51412c"), -- input.background
+		    InputIndicator = Color3.fromHex("#a57a4c"), -- editorWhitespace.foreground
+
+		    Dialog = Color3.fromHex("#362712"), -- menu.background
+		    DialogHolder = Color3.fromHex("#221a14"), -- peekViewEditor.background
+		    DialogHolderLine = Color3.fromHex("#5e452b"), -- peekView.border
+		    DialogButton = Color3.fromHex("#6e583b"), -- button.background
+		    DialogButtonBorder = Color3.fromHex("#5e452b"), -- peekView.border
+		    DialogBorder = Color3.fromHex("#5e452b"), -- peekView.border
+		    DialogInput = Color3.fromHex("#51412c"), -- input.background
+		    DialogInputLine = Color3.fromHex("#a57a4c"), -- focusBorder
+
+		    Text = Color3.fromHex("#d3af86"), -- editor.foreground
+		    SubText = Color3.fromHex("#a57a4c"), -- comments color
+		    Hover = Color3.fromHex("#7c5021"), -- list.activeSelectionBackground
+		    HoverChange = 0.1
+		}
+		themes["Solarized Dark"] = {
+		    Accent = Color3.fromHex("#2AA198"), -- String color as accent
+
+		    AcrylicMain = Color3.fromHex("#002B36"), -- editor.background
+		    AcrylicBorder = Color3.fromHex("#073642"), -- editor.lineHighlightBackground
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#002B36"), Color3.fromHex("#002B36")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#2AA198"), -- focusBorder
+		    Tab = Color3.fromHex("#839496"), -- editor.foreground
+
+		    Element = Color3.fromHex("#003847"), -- input.background
+		    ElementBorder = Color3.fromHex("#2AA198"), -- focusBorder
+		    InElementBorder = Color3.fromHex("#2AA198"), -- String color
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#2AA198"), -- String color
+		    ToggleToggled = Color3.fromHex("#002B36"), -- editor.background
+
+		    SliderRail = Color3.fromHex("#2AA198"), -- String color
+
+		    DropdownFrame = Color3.fromHex("#00212B"), -- dropdown.background
+		    DropdownHolder = Color3.fromHex("#00212B"), -- dropdown.background
+		    DropdownBorder = Color3.fromHex("#2AA198"), -- dropdown.border
+		    DropdownOption = Color3.fromHex("#839496"), -- foreground
+
+		    Keybind = Color3.fromHex("#003847"), -- input.background
+
+		    Input = Color3.fromHex("#003847"), -- input.background
+		    InputFocused = Color3.fromHex("#003847"), -- input.background
+		    InputIndicator = Color3.fromHex("#93A1A1"), -- input.placeholderForeground
+
+		    Dialog = Color3.fromHex("#00212B"), -- editorWidget.background
+		    DialogHolder = Color3.fromHex("#002B36"), -- editor.background
+		    DialogHolderLine = Color3.fromHex("#073642"), -- editor.lineHighlightBackground
+		    DialogButton = Color3.fromHex("#003847"), -- input.background
+		    DialogButtonBorder = Color3.fromHex("#2AA198"), -- focusBorder
+		    DialogBorder = Color3.fromHex("#2AA198"), -- focusBorder
+		    DialogInput = Color3.fromHex("#003847"), -- input.background
+		    DialogInputLine = Color3.fromHex("#2AA198"), -- String color
+
+		    Text = Color3.fromHex("#839496"), -- editor.foreground
+		    SubText = Color3.fromHex("#586E75"), -- Comment color
+		    Hover = Color3.fromHex("#004454"), -- list.hoverBackground
+		    HoverChange = 0.1
+		}
+		themes["Solarized Light"] = {
+		    Accent = Color3.fromHex("#b58900"), -- Using the extension button color as accent
+
+		    AcrylicMain = Color3.fromHex("#FDF6E3"), -- editor.background
+		    AcrylicBorder = Color3.fromHex("#DDD6C1"), -- editorGroup.border
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#FDF6E3"), Color3.fromHex("#FDF6E3")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#DDD6C1"), -- editorGroup.border
+		    Tab = Color3.fromHex("#657B83"), -- editor.foreground
+
+		    Element = Color3.fromHex("#EEE8D5"), -- dropdown.background
+		    ElementBorder = Color3.fromHex("#D3AF86"), -- dropdown.border
+		    InElementBorder = Color3.fromHex("#b49471"), -- focusBorder
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#b58900"), -- extensionButton.prominentBackground
+		    ToggleToggled = Color3.fromHex("#FDF6E3"), -- editor.background
+
+		    SliderRail = Color3.fromHex("#b58900"), -- extensionButton.prominentBackground
+
+		    DropdownFrame = Color3.fromHex("#EEE8D5"), -- dropdown.background
+		    DropdownHolder = Color3.fromHex("#EEE8D5"), -- dropdown.background
+		    DropdownBorder = Color3.fromHex("#D3AF86"), -- dropdown.border
+		    DropdownOption = Color3.fromHex("#657B83"), -- editor.foreground
+
+		    Keybind = Color3.fromHex("#DDD6C1"), -- input.background
+
+		    Input = Color3.fromHex("#DDD6C1"), -- input.background
+		    InputFocused = Color3.fromHex("#DDD6C1"), -- input.background
+		    InputIndicator = Color3.fromHex("#586E75"), -- input.placeholderForeground
+
+		    Dialog = Color3.fromHex("#EEE8D5"), -- dropdown.background
+		    DialogHolder = Color3.fromHex("#EEE8D5"), -- sideBar.background
+		    DialogHolderLine = Color3.fromHex("#DDD6C1"), -- editorGroup.border
+		    DialogButton = Color3.fromHex("#AC9D57"), -- button.background
+		    DialogButtonBorder = Color3.fromHex("#D3AF86"), -- dropdown.border
+		    DialogBorder = Color3.fromHex("#DDD6C1"), -- editorGroup.border
+		    DialogInput = Color3.fromHex("#DDD6C1"), -- input.background
+		    DialogInputLine = Color3.fromHex("#b58900"), -- extensionButton.prominentBackground
+
+		    Text = Color3.fromHex("#657B83"), -- editor.foreground
+		    SubText = Color3.fromHex("#93A1A1"), -- Comment color from tokenColors
+		    Hover = Color3.fromHex("#DFCA88"), -- list.activeSelectionBackground
+		    HoverChange = 0.1
+		}
+		themes["DuoTone Dark Sea"] = {
+		    Accent = Color3.fromHex("#34FEBB"),
+
+		    AcrylicMain = Color3.fromHex("#1D262F"),
+		    AcrylicBorder = Color3.fromHex("#303F4F"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#1D262F"), Color3.fromHex("#1D262F")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#303F4F"),
+		    Tab = Color3.fromHex("#88b4e7"),
+
+		    Element = Color3.fromHex("#232D38"),
+		    ElementBorder = Color3.fromHex("#303F4F"),
+		    InElementBorder = Color3.fromHex("#34FEBB"),
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#34FEBB"),
+		    ToggleToggled = Color3.fromHex("#1D262F"),
+
+		    SliderRail = Color3.fromHex("#34FEBB"),
+
+		    DropdownFrame = Color3.fromHex("#232D38"),
+		    DropdownHolder = Color3.fromHex("#232D38"),
+		    DropdownBorder = Color3.fromHex("#303F4F"),
+		    DropdownOption = Color3.fromHex("#88b4e7"),
+
+		    Keybind = Color3.fromHex("#232D38"),
+
+		    Input = Color3.fromHex("#232D38"),
+		    InputFocused = Color3.fromHex("#232D38"),
+		    InputIndicator = Color3.fromHex("#444c55"),
+
+		    Dialog = Color3.fromHex("#232D38"),
+		    DialogHolder = Color3.fromHex("#1D262F"),
+		    DialogHolderLine = Color3.fromHex("#303F4F"),
+		    DialogButton = Color3.fromHex("#232D38"),
+		    DialogButtonBorder = Color3.fromHex("#303F4F"),
+		    DialogBorder = Color3.fromHex("#303F4F"),
+		    DialogInput = Color3.fromHex("#232D38"),
+		    DialogInputLine = Color3.fromHex("#34FEBB"),
+
+		    Text = Color3.fromHex("#88b4e7"),
+		    SubText = Color3.fromHex("#444c55"),
+		    Hover = Color3.fromHex("#354454"),
+		    HoverChange = 0.1
+		}
+		themes["DuoTone Dark Sky"] = {
+		    Accent = Color3.fromHex("#fec38f"),
+
+		    AcrylicMain = Color3.fromHex("#2c2734"),
+		    AcrylicBorder = Color3.fromHex("#443d51"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#2c2734"), Color3.fromHex("#2c2734")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#443d51"),
+		    Tab = Color3.fromHex("#cab2fa"),
+
+		    Element = Color3.fromHex("#342E3D"),
+		    ElementBorder = Color3.fromHex("#443d51"),
+		    InElementBorder = Color3.fromHex("#fec38f"),
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#fec38f"),
+		    ToggleToggled = Color3.fromHex("#2c2734"),
+
+		    SliderRail = Color3.fromHex("#fec38f"),
+
+		    DropdownFrame = Color3.fromHex("#342E3D"),
+		    DropdownHolder = Color3.fromHex("#342E3D"),
+		    DropdownBorder = Color3.fromHex("#443d51"),
+		    DropdownOption = Color3.fromHex("#cab2fa"),
+
+		    Keybind = Color3.fromHex("#342E3D"),
+
+		    Input = Color3.fromHex("#342E3D"),
+		    InputFocused = Color3.fromHex("#342E3D"),
+		    InputIndicator = Color3.fromHex("#544d60"),
+
+		    Dialog = Color3.fromHex("#342E3D"),
+		    DialogHolder = Color3.fromHex("#2c2734"),
+		    DialogHolderLine = Color3.fromHex("#443d51"),
+		    DialogButton = Color3.fromHex("#342E3D"),
+		    DialogButtonBorder = Color3.fromHex("#443d51"),
+		    DialogBorder = Color3.fromHex("#443d51"),
+		    DialogInput = Color3.fromHex("#342E3D"),
+		    DialogInputLine = Color3.fromHex("#fec38f"),
+
+		    Text = Color3.fromHex("#cab2fa"),
+		    SubText = Color3.fromHex("#544d60"),
+		    Hover = Color3.fromHex("#494256"),
+		    HoverChange = 0.1
+		}
+		themes["DuoTone Dark Space"] = {
+		    Accent = Color3.fromHex("#fe7734"),
+
+		    AcrylicMain = Color3.fromHex("#24242e"),
+		    AcrylicBorder = Color3.fromHex("#3a3a4a"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#24242e"), Color3.fromHex("#24242e")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#3a3a4a"),
+		    Tab = Color3.fromHex("#8686cb"),
+
+		    Element = Color3.fromHex("#2B2B36"),
+		    ElementBorder = Color3.fromHex("#3a3a4a"),
+		    InElementBorder = Color3.fromHex("#fe7734"),
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#fe7734"),
+		    ToggleToggled = Color3.fromHex("#24242e"),
+
+		    SliderRail = Color3.fromHex("#fe7734"),
+
+		    DropdownFrame = Color3.fromHex("#2B2B36"),
+		    DropdownHolder = Color3.fromHex("#2B2B36"),
+		    DropdownBorder = Color3.fromHex("#3a3a4a"),
+		    DropdownOption = Color3.fromHex("#8686cb"),
+
+		    Keybind = Color3.fromHex("#2B2B36"),
+
+		    Input = Color3.fromHex("#2B2B36"),
+		    InputFocused = Color3.fromHex("#2B2B36"),
+		    InputIndicator = Color3.fromHex("#49495a"),
+
+		    Dialog = Color3.fromHex("#2B2B36"),
+		    DialogHolder = Color3.fromHex("#24242e"),
+		    DialogHolderLine = Color3.fromHex("#3a3a4a"),
+		    DialogButton = Color3.fromHex("#2B2B36"),
+		    DialogButtonBorder = Color3.fromHex("#3a3a4a"),
+		    DialogBorder = Color3.fromHex("#3a3a4a"),
+		    DialogInput = Color3.fromHex("#2B2B36"),
+		    DialogInputLine = Color3.fromHex("#fe7734"),
+
+		    Text = Color3.fromHex("#8686cb"),
+		    SubText = Color3.fromHex("#49495a"),
+		    Hover = Color3.fromHex("#3F3F4F"),
+		    HoverChange = 0.1
+		}
+		themes["DuoTone Dark Forest"] = {
+		    Accent = Color3.fromHex("#e7f98b"),
+
+		    AcrylicMain = Color3.fromHex("#2a2d2a"),
+		    AcrylicBorder = Color3.fromHex("#424842"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#2a2d2a"), Color3.fromHex("#2a2d2a")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#424842"),
+		    Tab = Color3.fromHex("#a9bca9"),
+
+		    Element = Color3.fromHex("#313531"),
+		    ElementBorder = Color3.fromHex("#424842"),
+		    InElementBorder = Color3.fromHex("#e7f98b"),
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#e7f98b"),
+		    ToggleToggled = Color3.fromHex("#2a2d2a"),
+
+		    SliderRail = Color3.fromHex("#e7f98b"),
+
+		    DropdownFrame = Color3.fromHex("#313531"),
+		    DropdownHolder = Color3.fromHex("#313531"),
+		    DropdownBorder = Color3.fromHex("#424842"),
+		    DropdownOption = Color3.fromHex("#a9bca9"),
+
+		    Keybind = Color3.fromHex("#313531"),
+
+		    Input = Color3.fromHex("#313531"),
+		    InputFocused = Color3.fromHex("#313531"),
+		    InputIndicator = Color3.fromHex("#585f58"),
+
+		    Dialog = Color3.fromHex("#313531"),
+		    DialogHolder = Color3.fromHex("#2a2d2a"),
+		    DialogHolderLine = Color3.fromHex("#424842"),
+		    DialogButton = Color3.fromHex("#313531"),
+		    DialogButtonBorder = Color3.fromHex("#424842"),
+		    DialogBorder = Color3.fromHex("#424842"),
+		    DialogInput = Color3.fromHex("#313531"),
+		    DialogInputLine = Color3.fromHex("#e7f98b"),
+
+		    Text = Color3.fromHex("#a9bca9"),
+		    SubText = Color3.fromHex("#585f58"),
+		    Hover = Color3.fromHex("#474D47"),
+		    HoverChange = 0.1
+		}
+		themes["DuoTone Dark Earth"] = {
+		    Accent = Color3.fromHex("#fecb52"),
+
+		    AcrylicMain = Color3.fromHex("#2c2826"),
+		    AcrylicBorder = Color3.fromHex("#48413d"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#2c2826"), Color3.fromHex("#2c2826")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#48413d"),
+		    Tab = Color3.fromHex("#bd987f"),
+
+		    Element = Color3.fromHex("#35302D"),
+		    ElementBorder = Color3.fromHex("#48413d"),
+		    InElementBorder = Color3.fromHex("#fecb52"),
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#fecb52"),
+		    ToggleToggled = Color3.fromHex("#2c2826"),
+
+		    SliderRail = Color3.fromHex("#fecb52"),
+
+		    DropdownFrame = Color3.fromHex("#35302D"),
+		    DropdownHolder = Color3.fromHex("#35302D"),
+		    DropdownBorder = Color3.fromHex("#48413d"),
+		    DropdownOption = Color3.fromHex("#bd987f"),
+
+		    Keybind = Color3.fromHex("#35302D"),
+
+		    Input = Color3.fromHex("#35302D"),
+		    InputFocused = Color3.fromHex("#35302D"),
+		    InputIndicator = Color3.fromHex("#564b43"),
+
+		    Dialog = Color3.fromHex("#35302D"),
+		    DialogHolder = Color3.fromHex("#2c2826"),
+		    DialogHolderLine = Color3.fromHex("#48413d"),
+		    DialogButton = Color3.fromHex("#35302D"),
+		    DialogButtonBorder = Color3.fromHex("#48413d"),
+		    DialogBorder = Color3.fromHex("#48413d"),
+		    DialogInput = Color3.fromHex("#35302D"),
+		    DialogInputLine = Color3.fromHex("#fecb52"),
+
+		    Text = Color3.fromHex("#bd987f"),
+		    SubText = Color3.fromHex("#564b43"),
+		    Hover = Color3.fromHex("#4D4642"),
+		    HoverChange = 0.1
+		}
+		themes["VSC Dark+"] = {
+		    Accent = Color3.fromHex("#DCDCAA"), -- Based on function declarations color
+
+		    AcrylicMain = Color3.fromHex("#1E1E1E"), -- VS Code's default dark background
+		    AcrylicBorder = Color3.fromHex("#444444"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#1E1E1E"), Color3.fromHex("#1E1E1E")),
+		    AcrylicNoise = 0.92,
+
+		    TitleBarLine = Color3.fromHex("#444444"),
+		    Tab = Color3.fromHex("#CCCCCC"),
+
+		    Element = Color3.fromHex("#2D2D2D"),
+		    ElementBorder = Color3.fromHex("#404040"),
+		    InElementBorder = Color3.fromHex("#DCDCAA"),
+		    ElementTransparency = 0.85,
+
+		    ToggleSlider = Color3.fromHex("#4EC9B0"), -- Using type declaration color
+		    ToggleToggled = Color3.fromHex("#1E1E1E"),
+
+		    SliderRail = Color3.fromHex("#4EC9B0"),
+
+		    DropdownFrame = Color3.fromHex("#2D2D2D"),
+		    DropdownHolder = Color3.fromHex("#252526"),
+		    DropdownBorder = Color3.fromHex("#404040"),
+		    DropdownOption = Color3.fromHex("#9CDCFE"), -- Variable color
+
+		    Keybind = Color3.fromHex("#2D2D2D"),
+
+		    Input = Color3.fromHex("#3C3C3C"),
+		    InputFocused = Color3.fromHex("#3C3C3C"),
+		    InputIndicator = Color3.fromHex("#808080"),
+
+		    Dialog = Color3.fromHex("#252526"),
+		    DialogHolder = Color3.fromHex("#1E1E1E"),
+		    DialogHolderLine = Color3.fromHex("#404040"),
+		    DialogButton = Color3.fromHex("#2D2D2D"),
+		    DialogButtonBorder = Color3.fromHex("#404040"),
+		    DialogBorder = Color3.fromHex("#444444"),
+		    DialogInput = Color3.fromHex("#3C3C3C"),
+		    DialogInputLine = Color3.fromHex("#DCDCAA"),
+
+		    Text = Color3.fromHex("#D4D4D4"), -- Default text color
+		    SubText = Color3.fromHex("#808080"),
+		    Hover = Color3.fromHex("#2A2D2E"),
+		    HoverChange = 0.05
+		}
+		themes["VSC Dark Modern"] = {
+		    Accent = Color3.fromHex("#0078D4"), -- focusBorder
+
+		    AcrylicMain = Color3.fromHex("#181818"), -- activityBar.background
+		    AcrylicBorder = Color3.fromHex("#2B2B2B"), -- activityBar.border
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#181818"), Color3.fromHex("#181818")), -- activityBar.background
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#2B2B2B"), -- titleBar.border
+		    Tab = Color3.fromHex("#FFFFFF"), -- tab.activeForeground
+
+		    Element = Color3.fromHex("#313131"), -- button.secondaryBackground
+		    ElementBorder = Color3.fromHex("#3C3C3C"), -- button.secondaryHoverBackground
+		    InElementBorder = Color3.fromHex("#0078D4"), -- focusBorder
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#0078D4"), -- focusBorder
+		    ToggleToggled = Color3.fromHex("#313131"), -- checkbox.background
+
+		    SliderRail = Color3.fromHex("#0078D4"), -- focusBorder
+
+		    DropdownFrame = Color3.fromHex("#313131"), -- dropdown.background
+		    DropdownHolder = Color3.fromHex("#313131"), -- dropdown.background
+		    DropdownBorder = Color3.fromHex("#3C3C3C"), -- dropdown.border
+		    DropdownOption = Color3.fromHex("#CCCCCC"), -- dropdown.foreground
+
+		    Keybind = Color3.fromHex("#313131"), -- input.background
+
+		    Input = Color3.fromHex("#313131"), -- input.background
+		    InputFocused = Color3.fromHex("#313131"), -- input.background
+		    InputIndicator = Color3.fromHex("#989898"), -- input.placeholderForeground
+
+		    Dialog = Color3.fromHex("#202020"), -- editorWidget.background
+		    DialogHolder = Color3.fromHex("#1F1F1F"), -- editor.background
+		    DialogHolderLine = Color3.fromHex("#2B2B2B"), -- panel.border
+		    DialogButton = Color3.fromHex("#313131"), -- button.secondaryBackground
+		    DialogButtonBorder = Color3.fromHex("#3C3C3C"), -- button.secondaryHoverBackground
+		    DialogBorder = Color3.fromHex("#2B2B2B"), -- notifications.border
+		    DialogInput = Color3.fromHex("#313131"), -- input.background
+		    DialogInputLine = Color3.fromHex("#0078D4"), -- focusBorder
+
+		    Text = Color3.fromHex("#CCCCCC"), -- foreground
+		    SubText = Color3.fromHex("#9D9D9D"), -- descriptionForeground
+		    Hover = Color3.fromHex("#3C3C3C"), -- button.secondaryHoverBackground
+		    HoverChange = 0.1
+		}
+		themes["VSC Dark High Contrast"] = {
+		    Accent = Color3.fromHex("#569cd6"), -- Based on keyword color
+
+		    AcrylicMain = Color3.fromHex("#000000"), -- editor.background
+		    AcrylicBorder = Color3.fromHex("#FFFFFF"), -- Based on editor.foreground
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#000000"), Color3.fromHex("#000000")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#FFFFFF"),
+		    Tab = Color3.fromHex("#FFFFFF"),
+
+		    Element = Color3.fromHex("#000000"),
+		    ElementBorder = Color3.fromHex("#FFFFFF"),
+		    InElementBorder = Color3.fromHex("#569cd6"),
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#569cd6"),
+		    ToggleToggled = Color3.fromHex("#000000"),
+
+		    SliderRail = Color3.fromHex("#569cd6"),
+
+		    DropdownFrame = Color3.fromHex("#000000"),
+		    DropdownHolder = Color3.fromHex("#000000"),
+		    DropdownBorder = Color3.fromHex("#FFFFFF"),
+		    DropdownOption = Color3.fromHex("#FFFFFF"),
+
+		    Keybind = Color3.fromHex("#000000"),
+
+		    Input = Color3.fromHex("#000000"),
+		    InputFocused = Color3.fromHex("#000000"),
+		    InputIndicator = Color3.fromHex("#7c7c7c"), -- Based on editorWhitespace.foreground
+
+		    Dialog = Color3.fromHex("#000000"),
+		    DialogHolder = Color3.fromHex("#000000"),
+		    DialogHolderLine = Color3.fromHex("#FFFFFF"),
+		    DialogButton = Color3.fromHex("#000000"),
+		    DialogButtonBorder = Color3.fromHex("#FFFFFF"),
+		    DialogBorder = Color3.fromHex("#FFFFFF"),
+		    DialogInput = Color3.fromHex("#000000"),
+		    DialogInputLine = Color3.fromHex("#569cd6"),
+
+		    Text = Color3.fromHex("#FFFFFF"), -- editor.foreground
+		    SubText = Color3.fromHex("#9D9D9D"), -- descriptionForeground
+		    Hover = Color3.fromHex("#383a49"), -- Based on actionBar.toggledBackground
+		    HoverChange = 0.1
+		}
+		themes["VSC Light+"] = {
+		    Accent = Color3.fromHex("#795E26"), -- Function declarations color
+
+		    AcrylicMain = Color3.fromHex("#FFFFFF"), -- editor.background
+		    AcrylicBorder = Color3.fromHex("#D4D4D4"), -- menu.border
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#FFFFFF"), Color3.fromHex("#FFFFFF")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#D4D4D4"), -- menu.border
+		    Tab = Color3.fromHex("#000000"), -- editor.foreground
+
+		    Element = Color3.fromHex("#F3F3F3"), -- editorSuggestWidget.background
+		    ElementBorder = Color3.fromHex("#CECECE"), -- searchEditor.textInputBorder
+		    InElementBorder = Color3.fromHex("#795E26"), -- Function color as accent
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#795E26"), -- Function color as accent
+		    ToggleToggled = Color3.fromHex("#FFFFFF"), -- editor.background
+
+		    SliderRail = Color3.fromHex("#795E26"), -- Function color as accent
+
+		    DropdownFrame = Color3.fromHex("#FFFFFF"), -- editor.background
+		    DropdownHolder = Color3.fromHex("#FFFFFF"), -- editor.background
+		    DropdownBorder = Color3.fromHex("#CECECE"), -- searchEditor.textInputBorder
+		    DropdownOption = Color3.fromHex("#001080"), -- Variable color
+
+		    Keybind = Color3.fromHex("#FFFFFF"), -- editor.background
+
+		    Input = Color3.fromHex("#FFFFFF"), -- editor.background
+		    InputFocused = Color3.fromHex("#FFFFFF"), -- editor.background
+		    InputIndicator = Color3.fromHex("#767676"), -- input.placeholderForeground
+
+		    Dialog = Color3.fromHex("#F3F3F3"), -- editorSuggestWidget.background
+		    DialogHolder = Color3.fromHex("#FFFFFF"), -- editor.background
+		    DialogHolderLine = Color3.fromHex("#D4D4D4"), -- menu.border
+		    DialogButton = Color3.fromHex("#F3F3F3"), -- editorSuggestWidget.background
+		    DialogButtonBorder = Color3.fromHex("#CECECE"), -- searchEditor.textInputBorder
+		    DialogBorder = Color3.fromHex("#D4D4D4"), -- menu.border
+		    DialogInput = Color3.fromHex("#FFFFFF"), -- editor.background
+		    DialogInputLine = Color3.fromHex("#795E26"), -- Function color as accent
+
+		    Text = Color3.fromHex("#000000"), -- editor.foreground
+		    SubText = Color3.fromHex("#6F6F6F"), -- sideBarTitle.foreground
+		    Hover = Color3.fromHex("#E8E8E8"), -- list.hoverBackground
+		    HoverChange = 0.1
+		}
+		themes["VSC Light Modern"] = {
+		    Accent = Color3.fromHex("#005FB8"), -- focusBorder
+
+		    AcrylicMain = Color3.fromHex("#F8F8F8"), -- activityBar.background
+		    AcrylicBorder = Color3.fromHex("#E5E5E5"), -- activityBar.border
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#F8F8F8"), Color3.fromHex("#F8F8F8")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#E5E5E5"), -- titleBar.border
+		    Tab = Color3.fromHex("#1F1F1F"), -- activityBar.foreground
+
+		    Element = Color3.fromHex("#E5E5E5"), -- button.secondaryBackground
+		    ElementBorder = Color3.fromHex("#CECECE"), -- button.border
+		    InElementBorder = Color3.fromHex("#005FB8"), -- focusBorder
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#005FB8"), -- focusBorder
+		    ToggleToggled = Color3.fromHex("#FFFFFF"), -- editor.background
+
+		    SliderRail = Color3.fromHex("#005FB8"), -- focusBorder
+
+		    DropdownFrame = Color3.fromHex("#FFFFFF"), -- dropdown.background
+		    DropdownHolder = Color3.fromHex("#FFFFFF"), -- dropdown.background
+		    DropdownBorder = Color3.fromHex("#CECECE"), -- dropdown.border
+		    DropdownOption = Color3.fromHex("#3B3B3B"), -- dropdown.foreground
+
+		    Keybind = Color3.fromHex("#FFFFFF"), -- input.background
+
+		    Input = Color3.fromHex("#FFFFFF"), -- input.background
+		    InputFocused = Color3.fromHex("#FFFFFF"), -- input.background
+		    InputIndicator = Color3.fromHex("#767676"), -- input.placeholderForeground
+
+		    Dialog = Color3.fromHex("#F8F8F8"), -- editorWidget.background
+		    DialogHolder = Color3.fromHex("#FFFFFF"), -- editor.background
+		    DialogHolderLine = Color3.fromHex("#E5E5E5"), -- panel.border
+		    DialogButton = Color3.fromHex("#E5E5E5"), -- button.secondaryBackground
+		    DialogButtonBorder = Color3.fromHex("#CECECE"), -- button.border
+		    DialogBorder = Color3.fromHex("#E5E5E5"), -- notifications.border
+		    DialogInput = Color3.fromHex("#FFFFFF"), -- input.background
+		    DialogInputLine = Color3.fromHex("#005FB8"), -- focusBorder
+
+		    Text = Color3.fromHex("#3B3B3B"), -- foreground
+		    SubText = Color3.fromHex("#616161"), -- activityBar.inactiveForeground
+		    Hover = Color3.fromHex("#F2F2F2"), -- list.hoverBackground
+		    HoverChange = 0.1
+		}
+		themes["VSC Light High Contrast"] = {
+		    Accent = Color3.fromHex("#5e2cbc"), -- Based on function color
+
+		    AcrylicMain = Color3.fromHex("#ffffff"), -- Light background
+		    AcrylicBorder = Color3.fromHex("#292929"), -- Based on embedded foreground
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#ffffff"), Color3.fromHex("#ffffff")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#292929"),
+		    Tab = Color3.fromHex("#000000"), -- Pure black for high contrast
+
+		    Element = Color3.fromHex("#ffffff"),
+		    ElementBorder = Color3.fromHex("#515151"), -- Comment color
+		    InElementBorder = Color3.fromHex("#5e2cbc"), -- Function color
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#0F4A85"), -- Storage/keyword color
+		    ToggleToggled = Color3.fromHex("#ffffff"),
+
+		    SliderRail = Color3.fromHex("#0F4A85"),
+
+		    DropdownFrame = Color3.fromHex("#ffffff"),
+		    DropdownHolder = Color3.fromHex("#ffffff"),
+		    DropdownBorder = Color3.fromHex("#515151"),
+		    DropdownOption = Color3.fromHex("#001080"), -- Variable color
+
+		    Keybind = Color3.fromHex("#ffffff"),
+
+		    Input = Color3.fromHex("#ffffff"),
+		    InputFocused = Color3.fromHex("#ffffff"),
+		    InputIndicator = Color3.fromHex("#515151"), -- Comment color
+
+		    Dialog = Color3.fromHex("#ffffff"),
+		    DialogHolder = Color3.fromHex("#ffffff"),
+		    DialogHolderLine = Color3.fromHex("#515151"),
+		    DialogButton = Color3.fromHex("#ffffff"),
+		    DialogButtonBorder = Color3.fromHex("#515151"),
+		    DialogBorder = Color3.fromHex("#292929"),
+		    DialogInput = Color3.fromHex("#ffffff"),
+		    DialogInputLine = Color3.fromHex("#5e2cbc"),
+
+		    Text = Color3.fromHex("#292929"), -- Based on embedded foreground
+		    SubText = Color3.fromHex("#515151"), -- Comment color
+		    Hover = Color3.fromHex("#dddddd"), -- Based on actionBar.toggledBackground
+		    HoverChange = 0.1
+		}
+		themes["VSC Red"] = {
+		    Accent = Color3.fromHex("#cc3333"), -- badge.background
+
+		    AcrylicMain = Color3.fromHex("#580000"), -- activityBar.background
+		    AcrylicBorder = Color3.fromHex("#ff6666"), -- focusBorder
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#580000"), Color3.fromHex("#580000")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#772222"), -- titleBar.inactiveBackground
+		    Tab = Color3.fromHex("#F8F8F8"), -- editor.foreground
+
+		    Element = Color3.fromHex("#580000"), -- dropdown.background
+		    ElementBorder = Color3.fromHex("#ff6666"), -- editorGroup.border
+		    InElementBorder = Color3.fromHex("#cc0000"), -- inputOption.activeBorder
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#cc3333"), -- badge.background
+		    ToggleToggled = Color3.fromHex("#300000"), -- editorWidget.background
+
+		    SliderRail = Color3.fromHex("#cc3333"), -- badge.background
+
+		    DropdownFrame = Color3.fromHex("#580000"), -- dropdown.background
+		    DropdownHolder = Color3.fromHex("#580000"), -- dropdown.background
+		    DropdownBorder = Color3.fromHex("#220000"), -- editorSuggestWidget.border
+		    DropdownOption = Color3.fromHex("#F8F8F8"), -- editor.foreground
+
+		    Keybind = Color3.fromHex("#580000"), -- dropdown.background
+
+		    Input = Color3.fromHex("#580000"), -- input.background
+		    InputFocused = Color3.fromHex("#580000"), -- input.background
+		    InputIndicator = Color3.fromHex("#c10000"), -- editorWhitespace.foreground
+
+		    Dialog = Color3.fromHex("#300000"), -- editorWidget.background
+		    DialogHolder = Color3.fromHex("#300000"), -- editorWidget.background
+		    DialogHolderLine = Color3.fromHex("#ff0000"), -- peekView.border
+		    DialogButton = Color3.fromHex("#833333"), -- button.background
+		    DialogButtonBorder = Color3.fromHex("#662222"), -- list.dropBackground
+		    DialogBorder = Color3.fromHex("#220000"), -- editorSuggestWidget.border
+		    DialogInput = Color3.fromHex("#580000"), -- input.background
+		    DialogInputLine = Color3.fromHex("#cc3333"), -- badge.background
+
+		    Text = Color3.fromHex("#F8F8F8"), -- editor.foreground
+		    SubText = Color3.fromHex("#e7c0c0"), -- comment color from tokenColors
+		    Hover = Color3.fromHex("#800000"), -- list.hoverBackground
+		    HoverChange = 0.1
+		}
+		themes["VS Dark"] = {
+		    Accent = Color3.fromHex("#007ACC"), -- activityBarBadge.background
+
+		    AcrylicMain = Color3.fromHex("#1E1E1E"), -- editor.background
+		    AcrylicBorder = Color3.fromHex("#303031"), -- widget.border
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#1E1E1E"), Color3.fromHex("#1E1E1E")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#303031"), -- widget.border
+		    Tab = Color3.fromHex("#ffffff"), -- tab.selectedForeground
+
+		    Element = Color3.fromHex("#222222"), -- tab.selectedBackground
+		    ElementBorder = Color3.fromHex("#6B6B6B"), -- checkbox.border
+		    InElementBorder = Color3.fromHex("#007ACC"), -- activityBarBadge.background
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#007ACC"), -- activityBarBadge.background
+		    ToggleToggled = Color3.fromHex("#222222"), -- tab.selectedBackground
+
+		    SliderRail = Color3.fromHex("#404040"), -- editorIndentGuide.background1
+
+		    DropdownFrame = Color3.fromHex("#252526"), -- menu.background
+		    DropdownHolder = Color3.fromHex("#252526"), -- menu.background
+		    DropdownBorder = Color3.fromHex("#454545"), -- menu.border
+		    DropdownOption = Color3.fromHex("#CCCCCC"), -- menu.foreground
+
+		    Keybind = Color3.fromHex("#222222"), -- tab.selectedBackground
+
+		    Input = Color3.fromHex("#222222"), -- tab.selectedBackground
+		    InputFocused = Color3.fromHex("#222222"), -- tab.selectedBackground
+		    InputIndicator = Color3.fromHex("#A6A6A6"), -- input.placeholderForeground
+
+		    Dialog = Color3.fromHex("#252526"), -- menu.background
+		    DialogHolder = Color3.fromHex("#252526"), -- menu.background
+		    DialogHolderLine = Color3.fromHex("#454545"), -- menu.separatorBackground
+		    DialogButton = Color3.fromHex("#222222"), -- tab.selectedBackground
+		    DialogButtonBorder = Color3.fromHex("#454545"), -- menu.border
+		    DialogBorder = Color3.fromHex("#454545"), -- menu.border
+		    DialogInput = Color3.fromHex("#222222"), -- tab.selectedBackground
+		    DialogInputLine = Color3.fromHex("#007ACC"), -- activityBarBadge.background
+
+		    Text = Color3.fromHex("#D4D4D4"), -- editor.foreground
+		    SubText = Color3.fromHex("#BBBBBB"), -- sideBarTitle.foreground
+		    Hover = Color3.fromHex("#383B3D"), -- list.dropBackground
+		    HoverChange = 0.1
+		}
+		themes["VS Light"] = {
+		    Accent = Color3.fromHex("#007ACC"), -- activityBarBadge.background
+
+		    AcrylicMain = Color3.fromHex("#FFFFFF"), -- editor.background
+		    AcrylicBorder = Color3.fromHex("#919191"), -- checkbox.border
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#FFFFFF"), Color3.fromHex("#FFFFFF")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#D4D4D4"), -- menu.border
+		    Tab = Color3.fromHex("#333333"), -- tab.selectedForeground
+
+		    Element = Color3.fromHex("#F3F3F3"), -- editorSuggestWidget.background
+		    ElementBorder = Color3.fromHex("#CECECE"), -- searchEditor.textInputBorder
+		    InElementBorder = Color3.fromHex("#007ACC"), -- activityBarBadge.background
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#007ACC"), -- activityBarBadge.background
+		    ToggleToggled = Color3.fromHex("#FFFFFF"), -- editor.background
+
+		    SliderRail = Color3.fromHex("#007ACC"), -- activityBarBadge.background
+
+		    DropdownFrame = Color3.fromHex("#FFFFFF"), -- editor.background
+		    DropdownHolder = Color3.fromHex("#FFFFFF"), -- editor.background
+		    DropdownBorder = Color3.fromHex("#CECECE"), -- searchEditor.textInputBorder
+		    DropdownOption = Color3.fromHex("#000000"), -- editor.foreground
+
+		    Keybind = Color3.fromHex("#FFFFFF"), -- editor.background
+
+		    Input = Color3.fromHex("#FFFFFF"), -- editor.background
+		    InputFocused = Color3.fromHex("#FFFFFF"), -- editor.background
+		    InputIndicator = Color3.fromHex("#767676"), -- input.placeholderForeground
+
+		    Dialog = Color3.fromHex("#F3F3F3"), -- editorSuggestWidget.background
+		    DialogHolder = Color3.fromHex("#FFFFFF"), -- editor.background
+		    DialogHolderLine = Color3.fromHex("#D4D4D4"), -- menu.border
+		    DialogButton = Color3.fromHex("#F3F3F3"), -- editorSuggestWidget.background
+		    DialogButtonBorder = Color3.fromHex("#CECECE"), -- searchEditor.textInputBorder
+		    DialogBorder = Color3.fromHex("#D4D4D4"), -- menu.border
+		    DialogInput = Color3.fromHex("#FFFFFF"), -- editor.background
+		    DialogInputLine = Color3.fromHex("#007ACC"), -- activityBarBadge.background
+
+		    Text = Color3.fromHex("#000000"), -- editor.foreground
+		    SubText = Color3.fromHex("#6F6F6F"), -- sideBarTitle.foreground
+		    Hover = Color3.fromHex("#E8E8E8"), -- list.hoverBackground
+		    HoverChange = 0.1
+		}
+		themes["GitHub Dark"] = {
+		    Accent = Color3.fromHex("#005cc5"), -- focusBorder
+
+		    AcrylicMain = Color3.fromHex("#1f2428"), -- sideBar.background
+		    AcrylicBorder = Color3.fromHex("#1b1f23"),  -- titleBar.border
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#1f2428"), Color3.fromHex("#1f2428")),-- sideBar.background
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#1b1f23"), -- titleBar.border
+		    Tab = Color3.fromHex("#e1e4e8"), -- titleBar.activeForeground
+
+		    Element = Color3.fromHex("#2f363d"),  -- input.background
+		    ElementBorder = Color3.fromHex("#1b1f23"), -- input.border
+		    InElementBorder = Color3.fromHex("#005cc5"), -- focusBorder
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#005cc5"), -- focusBorder
+		    ToggleToggled = Color3.fromHex("#2f363d"), -- input.background
+
+		    SliderRail = Color3.fromHex("#005cc5"),  -- focusBorder
+
+		    DropdownFrame = Color3.fromHex("#2f363d"), -- dropdown.background
+		    DropdownHolder = Color3.fromHex("#2f363d"), -- dropdown.background
+		    DropdownBorder = Color3.fromHex("#1b1f23"),  -- dropdown.border
+		    DropdownOption = Color3.fromHex("#e1e4e8"),  -- dropdown.foreground
+
+		    Keybind = Color3.fromHex("#2f363d"),  -- input.background
+
+		    Input = Color3.fromHex("#2f363d"),  -- input.background
+		    InputFocused = Color3.fromHex("#2f363d"),  -- input.background
+		    InputIndicator = Color3.fromHex("#959da5"),-- input.placeholderForeground
+
+		    Dialog = Color3.fromHex("#2f363d"),  -- notifications.background
+		    DialogHolder = Color3.fromHex("#2f363d"), -- notifications.background
+		    DialogHolderLine = Color3.fromHex("#444d56"), --  textBlockQuote.border
+		    DialogButton = Color3.fromHex("#2f363d"), --  Your preferred button background
+		    DialogButtonBorder = Color3.fromHex("#1b1f23"),-- Your preferred button border
+		    DialogBorder = Color3.fromHex("#1b1f23"), -- notifications.border
+		    DialogInput = Color3.fromHex("#2f363d"), -- notifications.background
+		    DialogInputLine = Color3.fromHex("#005cc5"), -- focusBorder
+
+		    Text = Color3.fromHex("#d1d5da"), -- foreground
+		    SubText = Color3.fromHex("#959da5"), -- descriptionForeground
+		    Hover = Color3.fromHex("#282e34"), -- list.hoverBackground
+		    HoverChange = 0.1
+		}
+		themes["GitHub Dark Dimmed"] = {
+		    Accent = Color3.fromHex("#316dca"), -- focusBorder
+
+		    AcrylicMain = Color3.fromHex("#1c2128"), -- sideBar.background
+		    AcrylicBorder = Color3.fromHex("#444c56"), -- titleBar.border
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#1c2128"), Color3.fromHex("#1c2128")), -- sideBar.background
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#444c56"), -- titleBar.border
+		    Tab = Color3.fromHex("#adbac7"),  -- tab.activeForeground
+
+		    Element = Color3.fromHex("#2d333b"), -- dropdown.background
+		    ElementBorder = Color3.fromHex("#444c56"),  -- dropdown.border
+		    InElementBorder = Color3.fromHex("#316dca"), -- focusBorder
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#316dca"),  -- focusBorder
+		    ToggleToggled = Color3.fromHex("#22272e"), -- input.background
+
+		    SliderRail = Color3.fromHex("#316dca"),  -- focusBorder
+
+		    DropdownFrame = Color3.fromHex("#2d333b"),  -- dropdown.background
+		    DropdownHolder = Color3.fromHex("#2d333b"), -- dropdown.background
+		    DropdownBorder = Color3.fromHex("#444c56"),  -- dropdown.border
+		    DropdownOption = Color3.fromHex("#adbac7"),  -- dropdown.foreground
+
+		    Keybind = Color3.fromHex("#22272e"), -- input.background
+
+		    Input = Color3.fromHex("#22272e"),  -- input.background
+		    InputFocused = Color3.fromHex("#22272e"),  -- input.background
+		    InputIndicator = Color3.fromHex("#636e7b"),  -- input.placeholderForeground
+
+		    Dialog = Color3.fromHex("#2d333b"), -- notifications.background
+		    DialogHolder = Color3.fromHex("#2d333b"), -- notifications.background
+		    DialogHolderLine = Color3.fromHex("#444c56"), -- notifications.border
+		    DialogButton = Color3.fromHex("#22272e"),  -- input.background (following your previous instruction)
+		    DialogButtonBorder = Color3.fromHex("#444c56"), -- dropdown.border (following your previous instruction)
+		    DialogBorder = Color3.fromHex("#444c56"), -- notifications.border
+		    DialogInput = Color3.fromHex("#22272e"), -- input.background
+		    DialogInputLine = Color3.fromHex("#316dca"), -- focusBorder
+
+		    Text = Color3.fromHex("#adbac7"),  -- foreground
+		    SubText = Color3.fromHex("#768390"),  -- descriptionForeground
+		    Hover = Color3.fromHex("#636e7b"),  -- list.hoverBackground (subtle transparent hover) or #333A42
+		    HoverChange = 0.1 
+		}
+		themes["GitHub Dark Default"] = {
+		    Accent = Color3.fromHex("#1f6feb"),  -- focusBorder
+
+		    AcrylicMain = Color3.fromHex("#010409"), -- sideBar.background
+		    AcrylicBorder = Color3.fromHex("#30363d"), -- titleBar.border
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#010409"), Color3.fromHex("#010409")), -- sideBar.background
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#30363d"), -- titleBar.border
+		    Tab = Color3.fromHex("#e6edf3"), -- tab.activeForeground
+
+		    Element = Color3.fromHex("#161b22"), -- dropdown.background  (using a darker shade for more contrast)
+		    ElementBorder = Color3.fromHex("#30363d"), -- dropdown.border
+		    InElementBorder = Color3.fromHex("#1f6feb"), -- focusBorder
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#1f6feb"), -- focusBorder
+		    ToggleToggled = Color3.fromHex("#0d1117"), -- input.background
+
+		    SliderRail = Color3.fromHex("#1f6feb"), -- focusBorder
+
+		    DropdownFrame = Color3.fromHex("#161b22"), -- dropdown.background
+		    DropdownHolder = Color3.fromHex("#161b22"), -- dropdown.background
+		    DropdownBorder = Color3.fromHex("#30363d"), -- dropdown.border
+		    DropdownOption = Color3.fromHex("#e6edf3"),  -- dropdown.foreground
+
+		    Keybind = Color3.fromHex("#0d1117"), -- input.background
+
+		    Input = Color3.fromHex("#0d1117"),  -- input.background
+		    InputFocused = Color3.fromHex("#0d1117"),  -- input.background
+		    InputIndicator = Color3.fromHex("#6e7681"),-- input.placeholderForeground
+
+		    Dialog = Color3.fromHex("#161b22"), -- notifications.background
+		    DialogHolder = Color3.fromHex("#161b22"), -- notifications.background
+		    DialogHolderLine = Color3.fromHex("#30363d"), -- notifications.border
+		    DialogButton = Color3.fromHex("#0d1117"), -- input.background (as requested)
+		    DialogButtonBorder = Color3.fromHex("#30363d"),  -- dropdown.border (as requested)
+		    DialogBorder = Color3.fromHex("#30363d"),  -- notifications.border
+		    DialogInput = Color3.fromHex("#0d1117"), -- input.background
+		    DialogInputLine = Color3.fromHex("#1f6feb"), -- focusBorder
+
+		    Text = Color3.fromHex("#e6edf3"), -- foreground
+		    SubText = Color3.fromHex("#7d8590"),-- descriptionForeground
+		    Hover = Color3.fromHex("#6e7681"),  -- list.hoverBackground (keeping alpha for subtle hover effect) or #22272D
+		    HoverChange = 0.1 
+		}
+		themes["GitHub Dark High Contrast"] = {
+		    Accent = Color3.fromHex("#409eff"), -- focusBorder
+
+		    AcrylicMain = Color3.fromHex("#010409"), -- sideBar.background
+		    AcrylicBorder = Color3.fromHex("#7a828e"),  -- titleBar.border
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#010409"), Color3.fromHex("#010409")), -- sideBar.background
+		    AcrylicNoise = 1,
+
+
+		    TitleBarLine = Color3.fromHex("#7a828e"),  -- titleBar.border
+		    Tab = Color3.fromHex("#f0f3f6"), -- tab.activeForeground
+
+		    Element = Color3.fromHex("#272b33"), -- dropdown.background
+		    ElementBorder = Color3.fromHex("#7a828e"), -- dropdown.border
+		    InElementBorder = Color3.fromHex("#409eff"), -- focusBorder
+		    ElementTransparency = 0,
+
+
+		    ToggleSlider = Color3.fromHex("#409eff"),  -- focusBorder
+		    ToggleToggled = Color3.fromHex("#0a0c10"),  -- input.background
+
+		    SliderRail = Color3.fromHex("#409eff"), -- focusBorder
+
+		    DropdownFrame = Color3.fromHex("#272b33"), -- dropdown.background
+		    DropdownHolder = Color3.fromHex("#272b33"), -- dropdown.background
+		    DropdownBorder = Color3.fromHex("#7a828e"),  -- dropdown.border
+		    DropdownOption = Color3.fromHex("#f0f3f6"),  -- dropdown.foreground
+
+		    Keybind = Color3.fromHex("#0a0c10"), -- input.background
+
+		    Input = Color3.fromHex("#0a0c10"), -- input.background
+		    InputFocused = Color3.fromHex("#0a0c10"), -- input.background
+		    InputIndicator = Color3.fromHex("#9ea7b3"), -- input.placeholderForeground
+
+		    Dialog = Color3.fromHex("#272b33"),  -- notifications.background
+		    DialogHolder = Color3.fromHex("#272b33"),  -- notifications.background
+		    DialogHolderLine = Color3.fromHex("#7a828e"), -- notifications.border
+		    DialogButton = Color3.fromHex("#0a0c10"), -- input.background (as previously requested)
+		    DialogButtonBorder = Color3.fromHex("#7a828e"), -- dropdown.border (as previously requested)
+		    DialogBorder = Color3.fromHex("#7a828e"), -- notifications.border
+		    DialogInput = Color3.fromHex("#0a0c10"), -- input.background
+		    DialogInputLine = Color3.fromHex("#409eff"), -- focusBorder
+
+		    Text = Color3.fromHex("#f0f3f6"),  -- foreground
+		    SubText = Color3.fromHex("#f0f3f6"), -- descriptionForeground (same as main text for high contrast)
+		    Hover = Color3.fromHex("#9ea7b3"), -- list.hoverBackground (subtle transparent hover) or #333A42 for solid
+		    HoverChange = 0.1
+		}
+		themes["GitHub Dark Colorblind"] = {
+		    Accent = Color3.fromHex("#1f6feb"), -- focusBorder
+
+		    AcrylicMain = Color3.fromHex("#010409"), -- sideBar.background
+		    AcrylicBorder = Color3.fromHex("#30363d"), -- titleBar.border
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#010409"), Color3.fromHex("#010409")), -- sideBar.background
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#30363d"), -- titleBar.border
+		    Tab = Color3.fromHex("#c9d1d9"), -- tab.activeForeground
+
+		    Element = Color3.fromHex("#161b22"), -- dropdown.background
+		    ElementBorder = Color3.fromHex("#30363d"), -- dropdown.border
+		    InElementBorder = Color3.fromHex("#1f6feb"),  -- focusBorder
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#1f6feb"),  -- focusBorder
+		    ToggleToggled = Color3.fromHex("#0d1117"), -- input.background
+
+		    SliderRail = Color3.fromHex("#1f6feb"),  -- focusBorder
+
+		    DropdownFrame = Color3.fromHex("#161b22"),  -- dropdown.background
+		    DropdownHolder = Color3.fromHex("#161b22"),  -- dropdown.background
+		    DropdownBorder = Color3.fromHex("#30363d"),  -- dropdown.border
+		    DropdownOption = Color3.fromHex("#c9d1d9"), -- dropdown.foreground
+
+		    Keybind = Color3.fromHex("#0d1117"),  -- input.background
+
+		    Input = Color3.fromHex("#0d1117"),  -- input.background
+		    InputFocused = Color3.fromHex("#0d1117"),  -- input.background
+		    InputIndicator = Color3.fromHex("#6e7681"),  -- input.placeholderForeground
+
+		    Dialog = Color3.fromHex("#161b22"), -- notifications.background
+		    DialogHolder = Color3.fromHex("#161b22"), -- notifications.background
+		    DialogHolderLine = Color3.fromHex("#30363d"), -- notifications.border
+		    DialogButton = Color3.fromHex("#0d1117"), -- input.background (following your established pattern)
+		    DialogButtonBorder = Color3.fromHex("#30363d"), -- dropdown.border (following your established pattern)
+		    DialogBorder = Color3.fromHex("#30363d"), -- notifications.border
+		    DialogInput = Color3.fromHex("#0d1117"), -- input.background
+		    DialogInputLine = Color3.fromHex("#1f6feb"),  -- focusBorder
+
+		    Text = Color3.fromHex("#c9d1d9"), -- foreground
+		    SubText = Color3.fromHex("#8b949e"), -- descriptionForeground
+		    Hover = Color3.fromHex("#6e7681"),  -- list.hoverBackground (subtle transparent hover) or #22272D for solid
+		    HoverChange = 0.1
+		}
+		themes["GitHub Light"] = {
+		    Accent = Color3.fromHex("2188ff"), -- focusBorder
+
+		    AcrylicMain = Color3.fromHex("f6f8fa"), -- sideBar.background
+		    AcrylicBorder = Color3.fromHex("e1e4e8"), -- titleBar.border
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("f6f8fa"), Color3.fromHex("f6f8fa")), -- sideBar.background
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("e1e4e8"), -- titleBar.border
+		    Tab = Color3.fromHex("2f363d"), -- tab.activeForeground
+
+		    Element = Color3.fromHex("fafbfc"), -- input.background
+		    ElementBorder = Color3.fromHex("e1e4e8"), -- input.border
+		    InElementBorder = Color3.fromHex("2188ff"), -- focusBorder
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("2188ff"), -- focusBorder
+		    ToggleToggled = Color3.fromHex("fafbfc"), -- input.background
+
+		    SliderRail = Color3.fromHex("2188ff"), -- focusBorder
+
+		    DropdownFrame = Color3.fromHex("fafbfc"), -- dropdown.background
+		    DropdownHolder = Color3.fromHex("fafbfc"), -- dropdown.background
+		    DropdownBorder = Color3.fromHex("e1e4e8"), -- dropdown.border
+		    DropdownOption = Color3.fromHex("2f363d"), -- dropdown.foreground
+
+		    Keybind = Color3.fromHex("fafbfc"), -- input.background
+
+		    Input = Color3.fromHex("fafbfc"), -- input.background
+		    InputFocused = Color3.fromHex("fafbfc"), -- input.background
+		    InputIndicator = Color3.fromHex("959da5"),  -- input.placeholderForeground
+
+		    Dialog = Color3.fromHex("fafbfc"), --  Using a light background for dialog
+		    DialogHolder = Color3.fromHex("fafbfc"), -- Using a light background for dialog holder
+		    DialogHolderLine = Color3.fromHex("e1e4e8"), --  Using a subtle line color
+		    DialogButton = Color3.fromHex("#fafbfc"),  -- Your preferred button background
+		    DialogButtonBorder = Color3.fromHex("#20252c"),  -- Your preferred button border
+		    DialogBorder = Color3.fromHex("e1e4e8"), -- dropdown.border
+		    DialogInput = Color3.fromHex("fafbfc"),  -- input.background
+		    DialogInputLine = Color3.fromHex("2188ff"), -- focusBorder
+
+		    Text = Color3.fromHex("24292e"), -- editor.foreground
+		    SubText = Color3.fromHex("6a737d"), -- descriptionForeground
+		    Hover = Color3.fromHex("ebf0f4"), -- list.hoverBackground
+		    HoverChange = 0.1 -- Slightly more pronounced hover effect
+		}
+		themes["GitHub Light Default"] = {
+		    Accent = Color3.fromHex("#0969da"), -- focusBorder
+
+		    AcrylicMain = Color3.fromHex("#f6f8fa"), -- sideBar.background
+		    AcrylicBorder = Color3.fromHex("#d0d7de"), -- titleBar.border
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#f6f8fa"), Color3.fromHex("#f6f8fa")), -- sideBar.background
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#d0d7de"), -- titleBar.border
+		    Tab = Color3.fromHex("#1f2328"), -- tab.activeForeground
+
+		    Element = Color3.fromHex("#ffffff"), -- input.background
+		    ElementBorder = Color3.fromHex("#d0d7de"), -- input.border
+		    InElementBorder = Color3.fromHex("#0969da"), -- focusBorder
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#0969da"), -- focusBorder
+		    ToggleToggled = Color3.fromHex("#ffffff"),  -- input.background
+
+		    SliderRail = Color3.fromHex("#0969da"),  -- focusBorder
+
+		    DropdownFrame = Color3.fromHex("#ffffff"), -- dropdown.background
+		    DropdownHolder = Color3.fromHex("#ffffff"), -- dropdown.background
+		    DropdownBorder = Color3.fromHex("#d0d7de"), -- dropdown.border
+		    DropdownOption = Color3.fromHex("#1f2328"), -- dropdown.foreground
+
+		    Keybind = Color3.fromHex("#ffffff"), -- input.background
+
+		    Input = Color3.fromHex("#ffffff"), -- input.background
+		    InputFocused = Color3.fromHex("#ffffff"), -- input.background
+		    InputIndicator = Color3.fromHex("#6e7781"), -- input.placeholderForeground
+
+		    Dialog = Color3.fromHex("#ffffff"),  -- notifications.background
+		    DialogHolder = Color3.fromHex("#ffffff"), -- notifications.background
+		    DialogHolderLine = Color3.fromHex("#d0d7de"), -- notifications.border
+		    DialogButton = Color3.fromHex("#ffffff"),  -- Your preferred button background
+		    DialogButtonBorder = Color3.fromHex("#20252c"),  -- Your preferred button border
+		    DialogBorder = Color3.fromHex("#d0d7de"),  -- notifications.border
+		    DialogInput = Color3.fromHex("#ffffff"), -- notifications.background
+		    DialogInputLine = Color3.fromHex("#0969da"),-- focusborder
+
+
+		    Text = Color3.fromHex("#1f2328"), -- editor.foreground
+		    SubText = Color3.fromHex("#656d76"), -- descriptionForeground
+		    Hover = Color3.fromHex("#eaeef2"), -- list.hoverBackground
+		    HoverChange = 0.1  -- A subtle hover effect
+		}
+		themes["GitHub Light High Contrast"] = {
+		    Accent = Color3.fromHex("#0349b4"), -- focusBorder
+
+		    AcrylicMain = Color3.fromHex("#ffffff"), -- sideBar.background
+		    AcrylicBorder = Color3.fromHex("#20252c"), -- titleBar.border
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#ffffff"), Color3.fromHex("#ffffff")), -- sideBar.background
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#20252c"), -- titleBar.border
+		    Tab = Color3.fromHex("#0e1116"), -- tab.activeForeground
+
+		    Element = Color3.fromHex("#ffffff"), -- input.background
+		    ElementBorder = Color3.fromHex("#20252c"),  -- input.border
+		    InElementBorder = Color3.fromHex("#0349b4"), -- focusBorder
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#0349b4"), -- focusBorder
+		    ToggleToggled = Color3.fromHex("#ffffff"), -- input.background
+
+		    SliderRail = Color3.fromHex("#0349b4"), -- focusBorder
+
+		    DropdownFrame = Color3.fromHex("#ffffff"), -- dropdown.background
+		    DropdownHolder = Color3.fromHex("#ffffff"), -- dropdown.background
+		    DropdownBorder = Color3.fromHex("#20252c"), -- dropdown.border
+		    DropdownOption = Color3.fromHex("#0e1116"),  -- dropdown.foreground
+
+		    Keybind = Color3.fromHex("#ffffff"), -- input.background
+
+		    Input = Color3.fromHex("#ffffff"), -- input.background
+		    InputFocused = Color3.fromHex("#ffffff"),  -- input.background
+		    InputIndicator = Color3.fromHex("#66707b"), -- input.placeholderForeground
+
+		    Dialog = Color3.fromHex("#ffffff"), -- Using a light background for dialog
+		    DialogHolder = Color3.fromHex("#ffffff"), -- Using a light background for dialog holder
+		    DialogHolderLine = Color3.fromHex("#20252c"), -- Using a subtle line color
+		    DialogButton = Color3.fromHex("#ffffff"), -- input.background
+		    DialogButtonBorder = Color3.fromHex("#20252c"), -- dropdown.border
+		    DialogBorder = Color3.fromHex("#20252c"), -- dropdown.border
+		    DialogInput = Color3.fromHex("#ffffff"), -- input.background
+		    DialogInputLine = Color3.fromHex("#0349b4"),-- focusBorder
+
+		    Text = Color3.fromHex("#0e1116"), -- editor.foreground
+		    SubText = Color3.fromHex("#66707b"), -- descriptionForeground (or a slightly lighter shade)
+		    Hover = Color3.fromHex("#e7ecf0"), -- list.hoverBackground
+		    HoverChange = 0.1 -- Slightly more pronounced hover effect
+		}
+		themes["GitHub Light Colorblind"] = {
+		    Accent = Color3.fromHex("#0969da"), -- focusBorder
+
+		    AcrylicMain = Color3.fromHex("#f6f8fa"), -- textBlockQuote.background
+		    AcrylicBorder = Color3.fromHex("#d0d7de"), -- textBlockQuote.border
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#f6f8fa"), Color3.fromHex("#f6f8fa")), -- textBlockQuote.background
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#d0d7de"), -- titleBar.border
+		    Tab = Color3.fromHex("#24292f"), -- foreground
+
+		    Element = Color3.fromHex("#ffffff"),  -- input.background
+		    ElementBorder = Color3.fromHex("#d0d7de"), -- input.border
+		    InElementBorder = Color3.fromHex("#0969da"), -- focusBorder
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#0969da"), -- focusBorder
+		    ToggleToggled = Color3.fromHex("#ffffff"), -- input.background
+
+		    SliderRail = Color3.fromHex("#0969da"), -- focusBorder
+
+		    DropdownFrame = Color3.fromHex("#ffffff"), -- dropdown.background
+		    DropdownHolder = Color3.fromHex("#ffffff"), -- dropdown.background
+		    DropdownBorder = Color3.fromHex("#d0d7de"), -- dropdown.border
+		    DropdownOption = Color3.fromHex("#24292f"), -- foreground
+
+		    Keybind = Color3.fromHex("#ffffff"), -- input.background
+
+		    Input = Color3.fromHex("#ffffff"), -- input.background
+		    InputFocused = Color3.fromHex("#ffffff"), -- input.background
+		    InputIndicator = Color3.fromHex("#6e7781"), -- input.placeholderForeground
+
+		    Dialog = Color3.fromHex("#ffffff"), -- notifications.background
+		    DialogHolder = Color3.fromHex("#ffffff"), -- notifications.background
+		    DialogHolderLine = Color3.fromHex("#d0d7de"),  -- notifications.border
+		    DialogButton = Color3.fromHex("#ffffff"), -- Your preferred button background
+		    DialogButtonBorder = Color3.fromHex("#20252c"), -- Your preferred button border
+		    DialogBorder = Color3.fromHex("#d0d7de"), -- notifications.border
+		    DialogInput = Color3.fromHex("#ffffff"),  -- notifications.background
+		    DialogInputLine = Color3.fromHex("#0969da"), -- focusBorder
+
+		    Text = Color3.fromHex("#24292f"),  -- foreground
+		    SubText = Color3.fromHex("#57606a"), -- descriptionForeground
+		    Hover = Color3.fromHex("#eaeef2"),  -- list.hoverBackground (alpha removed)
+		    HoverChange = 0.1
+		}
+		themes["Viow Arabian"] = {
+		    Accent = Color3.fromHex("#7b36e2"),
+
+		    AcrylicMain = Color3.fromHex("#110e1a"),
+		    AcrylicBorder = Color3.fromHex("#444444"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#110e1a"), Color3.fromHex("#110e1a")),
+		    AcrylicNoise = 0.92,
+
+		    TitleBarLine = Color3.fromHex("#444444"),
+		    Tab = Color3.fromHex("#CCCCCC"),
+
+		    Element = Color3.fromHex("#2D2D2D"),
+		    ElementBorder = Color3.fromHex("#404040"),
+		    InElementBorder = Color3.fromHex("#7b36e2"),
+		    ElementTransparency = 0.85,
+
+		    ToggleSlider = Color3.fromHex("#7b36e2"),
+		    ToggleToggled = Color3.fromHex("#110e1a"),
+
+		    SliderRail = Color3.fromHex("#7b36e2"),
+
+		    DropdownFrame = Color3.fromHex("#2D2D2D"),
+		    DropdownHolder = Color3.fromHex("#252526"),
+		    DropdownBorder = Color3.fromHex("#404040"),
+		    DropdownOption = Color3.fromHex("#a497b5"),
+
+		    Keybind = Color3.fromHex("#2D2D2D"),
+
+		    Input = Color3.fromHex("#3C3C3C"),
+		    InputFocused = Color3.fromHex("#3C3C3C"),
+		    InputIndicator = Color3.fromHex("#808080"),
+
+		    Dialog = Color3.fromHex("#2a1c3e"),
+		    DialogHolder = Color3.fromHex("#110e1a"),
+		    DialogHolderLine = Color3.fromHex("#100422"),
+		    DialogButton = Color3.fromHex("#2D2D2D"),
+		    DialogButtonBorder = Color3.fromHex("#404040"),
+		    DialogBorder = Color3.fromHex("#444444"),
+		    DialogInput = Color3.fromHex("#3C3C3C"),
+		    DialogInputLine = Color3.fromHex("#7b36e2"),
+
+		    Text = Color3.fromHex("#a497b5"),
+		    SubText = Color3.fromHex("#60576f"),
+		    Hover = Color3.fromHex("#2A2D2E"),
+		    HoverChange = 0.05
+		}
+		themes["Viow Arabian Mix"] = {
+		    Accent = Color3.fromHex("#7b36e2"),
+
+		    AcrylicMain = Color3.fromHex("#110e1a"),
+		    AcrylicBorder = Color3.fromHex("#444444"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#110e1a"), Color3.fromHex("#110e1a")),
+		    AcrylicNoise = 0.92,
+
+		    TitleBarLine = Color3.fromHex("#444444"),
+		    Tab = Color3.fromHex("#CCCCCC"),
+
+		    Element = Color3.fromHex("#2D2D2D"),
+		    ElementBorder = Color3.fromHex("#404040"),
+		    InElementBorder = Color3.fromHex("#7b36e2"),
+		    ElementTransparency = 0.85,
+
+		    ToggleSlider = Color3.fromHex("#7b36e2"),
+		    ToggleToggled = Color3.fromHex("#110e1a"),
+
+		    SliderRail = Color3.fromHex("#7b36e2"),
+
+		    DropdownFrame = Color3.fromHex("#2D2D2D"),
+		    DropdownHolder = Color3.fromHex("#252526"),
+		    DropdownBorder = Color3.fromHex("#404040"),
+		    DropdownOption = Color3.fromHex("#a497b5"),
+
+		    Keybind = Color3.fromHex("#2D2D2D"),
+
+		    Input = Color3.fromHex("#3C3C3C"),
+		    InputFocused = Color3.fromHex("#3C3C3C"),
+		    InputIndicator = Color3.fromHex("#808080"),
+
+		    Dialog = Color3.fromHex("#2a1c3e"),
+		    DialogHolder = Color3.fromHex("#150E33"),
+		    DialogHolderLine = Color3.fromHex("#100422"),
+		    DialogButton = Color3.fromHex("#2D2D2D"),
+		    DialogButtonBorder = Color3.fromHex("#404040"),
+		    DialogBorder = Color3.fromHex("#444444"),
+		    DialogInput = Color3.fromHex("#3C3C3C"),
+		    DialogInputLine = Color3.fromHex("#7b36e2"),
+
+		    Text = Color3.fromHex("#a497b5"),
+		    SubText = Color3.fromHex("#60576f"),
+		    Hover = Color3.fromHex("#2A2D2E"),
+		    HoverChange = 0.05
+		}
+		themes["Viow Darker"] = {
+		    Accent = Color3.fromHex("#165fb3"),
+
+		    AcrylicMain = Color3.fromHex("#21252b"),
+		    AcrylicBorder = Color3.fromHex("#383838"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#21252b"), Color3.fromHex("#21252b")),
+		    AcrylicNoise = 0.92,
+
+		    TitleBarLine = Color3.fromHex("#383838"),
+		    Tab = Color3.fromHex("#d3d0c8"),
+
+		    Element = Color3.fromHex("#2d333c"),
+		    ElementBorder = Color3.fromHex("#383838"),
+		    InElementBorder = Color3.fromHex("#165fb3"),
+		    ElementTransparency = 0.85,
+
+		    ToggleSlider = Color3.fromHex("#165fb3"),
+		    ToggleToggled = Color3.fromHex("#21252b"),
+
+		    SliderRail = Color3.fromHex("#165fb3"),
+
+		    DropdownFrame = Color3.fromHex("#2d333c"),
+		    DropdownHolder = Color3.fromHex("#1e2228"),
+		    DropdownBorder = Color3.fromHex("#383838"),
+		    DropdownOption = Color3.fromHex("#d3d0c8"),
+
+		    Keybind = Color3.fromHex("#2d333c"),
+
+		    Input = Color3.fromHex("#2d333c"),
+		    InputFocused = Color3.fromHex("#2d333c"),
+		    InputIndicator = Color3.fromHex("#747369"),
+
+		    Dialog = Color3.fromHex("#21252b"),
+		    DialogHolder = Color3.fromHex("#1E2228"),
+		    DialogHolderLine = Color3.fromHex("#383838"),
+		    DialogButton = Color3.fromHex("#2d333c"),
+		    DialogButtonBorder = Color3.fromHex("#383838"),
+		    DialogBorder = Color3.fromHex("#383838"),
+		    DialogInput = Color3.fromHex("#2d333c"),
+		    DialogInputLine = Color3.fromHex("#165fb3"),
+
+		    Text = Color3.fromHex("#d3d0c8"),
+		    SubText = Color3.fromHex("#747369"),
+		    Hover = Color3.fromHex("#383838"),
+		    HoverChange = 0.05
+		}
+		themes["Viow Flat"] = {
+		    Accent = Color3.fromHex("#165fb3"),
+
+		    AcrylicMain = Color3.fromHex("#191c28"),
+		    AcrylicBorder = Color3.fromHex("#191c28"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#191c28"), Color3.fromHex("#191c28")),
+		    AcrylicNoise = 0.92,
+
+		    TitleBarLine = Color3.fromHex("#191c28"),
+		    Tab = Color3.fromHex("#d3d0c8"),
+
+		    Element = Color3.fromHex("#191c28"),
+		    ElementBorder = Color3.fromHex("#191c28"),
+		    InElementBorder = Color3.fromHex("#165fb3"),
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#165fb3"),
+		    ToggleToggled = Color3.fromHex("#191c28"),
+
+		    SliderRail = Color3.fromHex("#165fb3"),
+
+		    DropdownFrame = Color3.fromHex("#191c28"),
+		    DropdownHolder = Color3.fromHex("#191c28"),
+		    DropdownBorder = Color3.fromHex("#191c28"),
+		    DropdownOption = Color3.fromHex("#d3d0c8"),
+
+		    Keybind = Color3.fromHex("#191c28"),
+
+		    Input = Color3.fromHex("#191c28"),
+		    InputFocused = Color3.fromHex("#191c28"),
+		    InputIndicator = Color3.fromHex("#747369"),
+
+		    Dialog = Color3.fromHex("#191c28"),
+		    DialogHolder = Color3.fromHex("#191c28"),
+		    DialogHolderLine = Color3.fromHex("#191c28"),
+		    DialogButton = Color3.fromHex("#191c28"),
+		    DialogButtonBorder = Color3.fromHex("#191c28"),
+		    DialogBorder = Color3.fromHex("#191c28"),
+		    DialogInput = Color3.fromHex("#191c28"),
+		    DialogInputLine = Color3.fromHex("#165fb3"),
+
+		    Text = Color3.fromHex("#d3d0c8"),
+		    SubText = Color3.fromHex("#747369"),
+		    Hover = Color3.fromHex("#464870"),
+		    HoverChange = 0.05
+		}
+		themes["Viow Light"] = {
+		    Accent = Color3.fromHex("#0f96ff"),
+
+		    AcrylicMain = Color3.fromHex("#ffffff"),
+		    AcrylicBorder = Color3.fromHex("#d4d4d4"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#ffffff"), Color3.fromHex("#ffffff")),
+		    AcrylicNoise = 1,
+
+		    TitleBarLine = Color3.fromHex("#d4d4d4"),
+		    Tab = Color3.fromHex("#8e8e8e"),
+
+		    Element = Color3.fromHex("#f3f3f3"),
+		    ElementBorder = Color3.fromHex("#cecece"),
+		    InElementBorder = Color3.fromHex("#0f96ff"),
+		    ElementTransparency = 0,
+
+		    ToggleSlider = Color3.fromHex("#0f96ff"),
+		    ToggleToggled = Color3.fromHex("#ffffff"),
+
+		    SliderRail = Color3.fromHex("#0f96ff"),
+
+		    DropdownFrame = Color3.fromHex("#ffffff"),
+		    DropdownHolder = Color3.fromHex("#ffffff"),
+		    DropdownBorder = Color3.fromHex("#cecece"),
+		    DropdownOption = Color3.fromHex("#57606c"),
+
+		    Keybind = Color3.fromHex("#ffffff"),
+
+		    Input = Color3.fromHex("#ffffff"),
+		    InputFocused = Color3.fromHex("#ffffff"),
+		    InputIndicator = Color3.fromHex("#767676"),
+
+		    Dialog = Color3.fromHex("#f3f3f3"),
+		    DialogHolder = Color3.fromHex("#ffffff"),
+		    DialogHolderLine = Color3.fromHex("#d4d4d4"),
+		    DialogButton = Color3.fromHex("#f3f3f3"),
+		    DialogButtonBorder = Color3.fromHex("#cecece"),
+		    DialogBorder = Color3.fromHex("#d4d4d4"),
+		    DialogInput = Color3.fromHex("#ffffff"),
+		    DialogInputLine = Color3.fromHex("#0f96ff"),
+
+		    Text = Color3.fromHex("#57606c"),
+		    SubText = Color3.fromHex("#6f6f6f"),
+		    Hover = Color3.fromHex("#e8e8e8"),
+		    HoverChange = 0.1
+		}
+		themes["Viow Mars"] = {
+		    Accent = Color3.fromHex("#e32b00"),
+
+		    AcrylicMain = Color3.fromHex("#130c0f"),
+		    AcrylicBorder = Color3.fromHex("#28191d"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#130c0f"), Color3.fromHex("#130c0f")),
+		    AcrylicNoise = 0.92,
+
+		    TitleBarLine = Color3.fromHex("#28191d"),
+		    Tab = Color3.fromHex("#d3d0c8"),
+
+		    Element = Color3.fromHex("#321f27"),
+		    ElementBorder = Color3.fromHex("#5a0d29"),
+		    InElementBorder = Color3.fromHex("#e32b00"),
+		    ElementTransparency = 0.85,
+
+		    ToggleSlider = Color3.fromHex("#e32b00"),
+		    ToggleToggled = Color3.fromHex("#130c0f"),
+
+		    SliderRail = Color3.fromHex("#e32b00"),
+
+		    DropdownFrame = Color3.fromHex("#321f27"),
+		    DropdownHolder = Color3.fromHex("#271e22"),
+		    DropdownBorder = Color3.fromHex("#5a0d29"),
+		    DropdownOption = Color3.fromHex("#d3d0c8"),
+
+		    Keybind = Color3.fromHex("#321f27"),
+
+		    Input = Color3.fromHex("#321f27"),
+		    InputFocused = Color3.fromHex("#321f27"),
+		    InputIndicator = Color3.fromHex("#747369"),
+
+		    Dialog = Color3.fromHex("#462531"),
+		    DialogHolder = Color3.fromHex("#3a1223"),
+		    DialogHolderLine = Color3.fromHex("#5c1b33"),
+		    DialogButton = Color3.fromHex("#321f27"),
+		    DialogButtonBorder = Color3.fromHex("#5a0d29"),
+		    DialogBorder = Color3.fromHex("#ff4f15"),
+		    DialogInput = Color3.fromHex("#321f27"),
+		    DialogInputLine = Color3.fromHex("#e32b00"),
+
+		    Text = Color3.fromHex("#d3d0c8"),
+		    SubText = Color3.fromHex("#747369"),
+		    Hover = Color3.fromHex("#5c1b33"),
+		    HoverChange = 0.05
+		}
+		themes["Viow Neon"] = {
+		    Accent = Color3.fromHex("#1591ff"),
+
+		    AcrylicMain = Color3.fromHex("#202432"),
+		    AcrylicBorder = Color3.fromHex("#191c28"),
+		    AcrylicGradient = ColorSequence.new(Color3.fromHex("#202432"), Color3.fromHex("#202432")),
+		    AcrylicNoise = 0.92,
+
+		    TitleBarLine = Color3.fromHex("#191c28"),
+		    Tab = Color3.fromHex("#d3d0c8"),
+
+		    Element = Color3.fromHex("#202432"),
+		    ElementBorder = Color3.fromHex("#0d2c5a"),
+		    InElementBorder = Color3.fromHex("#1591ff"),
+		    ElementTransparency = 0.85,
+
+		    ToggleSlider = Color3.fromHex("#1591ff"),
+		    ToggleToggled = Color3.fromHex("#202432"),
+
+		    SliderRail = Color3.fromHex("#1591ff"),
+
+		    DropdownFrame = Color3.fromHex("#202432"),
+		    DropdownHolder = Color3.fromHex("#1e2228"),
+		    DropdownBorder = Color3.fromHex("#0d2c5a"),
+		    DropdownOption = Color3.fromHex("#d3d0c8"),
+
+		    Keybind = Color3.fromHex("#202432"),
+
+		    Input = Color3.fromHex("#202432"),
+		    InputFocused = Color3.fromHex("#202432"),
+		    InputIndicator = Color3.fromHex("#747369"),
+
+		    Dialog = Color3.fromHex("#252f46"),
+		    DialogHolder = Color3.fromHex("#1c1f2b"),
+		    DialogHolderLine = Color3.fromHex("#1b375c"),
+		    DialogButton = Color3.fromHex("#202432"),
+		    DialogButtonBorder = Color3.fromHex("#0d2c5a"),
+		    DialogBorder = Color3.fromHex("#1591ff"),
+		    DialogInput = Color3.fromHex("#202432"),
+		    DialogInputLine = Color3.fromHex("#1591ff"),
+
+		    Text = Color3.fromHex("#d3d0c8"),
+		    SubText = Color3.fromHex("#747369"),
+		    Hover = Color3.fromHex("#1b375c"),
+		    HoverChange = 0.05
+		}
+		return themes
 	end,
 }
 do
