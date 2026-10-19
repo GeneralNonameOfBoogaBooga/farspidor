@@ -184,7 +184,7 @@ local moduleFactories = {
 		end
 
 		function Fluent:SetBackgroundImage(source)
-		    if not self.Appearance then return false, "Сначала создай окно интерфейса." end
+		    if not self.Appearance then return false, "Create an interface window first." end
 		    return self.Appearance:Apply(source)
 		end
 
@@ -548,17 +548,17 @@ local moduleFactories = {
 		    if type(source) == "number" and source > 0 and source % 1 == 0 and source < math.huge then
 		        source = string.format("%.0f", source)
 		    end
-		    if type(source) ~= "string" then return nil, "Укажи прямую ссылку на PNG/JPG или Roblox asset ID." end
+		    if type(source) ~= "string" then return nil, "Enter a direct PNG/JPG URL or a Roblox asset ID." end
 		    source = source:match("^%s*(.-)%s*$")
 		    if source == "" then return "" end
-		    if #source > 4096 or source:find("[%c]") then return nil, "Ссылка слишком длинная или содержит недопустимые символы." end
+		    if #source > 4096 or source:find("[%c]") then return nil, "The URL is too long or contains invalid characters." end
 		    local id = source:match("^rbxassetid://(%d+)$") or source:match("^(%d+)$")
 		    if id then
-		        if #id > 20 or not id:find("[1-9]") then return nil, "Некорректный Roblox asset ID." end
+		        if #id > 20 or not id:find("[1-9]") then return nil, "Invalid Roblox asset ID." end
 		        return "rbxassetid://" .. id
 		    end
 		    if source:match("^https?://[^/%s?#]+[^%s]*$") then return source end
-		    return nil, "Нужна прямая http/https-ссылка на изображение или Roblox asset ID."
+		    return nil, "Use a direct http/https image URL or a Roblox asset ID."
 		end
 
 		local function cacheName(source, extension)
@@ -575,29 +575,29 @@ local moduleFactories = {
 		function Assets.ResolveImage(source)
 		    local normalized, message = Assets.NormalizeImageSource(source)
 		    if not normalized then return nil, message end
-		    if normalized == "" then return nil, "Ссылка на изображение не указана." end
+		    if normalized == "" then return nil, "No image URL was provided." end
 		    if normalized:match("^rbxassetid://") then return normalized end
 		    if imageCache[normalized] then return imageCache[normalized] end
 		    local registerAsset = getcustomasset or getsynasset
 		    if type(registerAsset) ~= "function" or type(writefile) ~= "function" then
-		        return nil, "Загрузка картинок по URL здесь недоступна. Используй rbxassetid://ID."
+		        return nil, "Image URLs are unavailable in this environment. Use rbxassetid://ID."
 		    end
 		    local downloaded, bytes = pcall(function() return game:HttpGet(normalized) end)
 		    if not downloaded or type(bytes) ~= "string" or #bytes == 0 then
-		        return nil, "Не удалось скачать изображение. Проверь ссылку и соединение."
+		        return nil, "Could not download the image. Check the URL and your connection."
 		    end
-		    if #bytes > maxImageBytes then return nil, "Изображение превышает 12 МБ. Выбери файл поменьше." end
+		    if #bytes > maxImageBytes then return nil, "The image exceeds 12 MB. Choose a smaller file." end
 		    local extension
 		    if bytes:sub(1, 8) == "\137PNG\13\10\26\10" then extension = "png"
 		    elseif bytes:sub(1, 3) == "\255\216\255" then extension = "jpg"
-		    else return nil, "Ссылка должна вести прямо на PNG или JPG, а не на страницу сайта." end
+		    else return nil, "The URL must point directly to a PNG or JPG image file." end
 		    local ok, uri = pcall(function()
 		        local fileName = cacheName(normalized, extension)
 		        writefile(fileName, bytes)
 		        return registerAsset(fileName)
 		    end)
 		    if not ok or type(uri) ~= "string" or uri == "" then
-		        return nil, "Не удалось открыть скачанное изображение. Попробуй Roblox asset ID."
+		        return nil, "Could not open the downloaded image. Try a Roblox asset ID."
 		    end
 		    imageCache[normalized] = uri
 		    table.insert(imageCacheOrder, normalized)
@@ -5149,7 +5149,7 @@ local moduleFactories = {
 		    return true
 		end
 		function Profiles:Save(name, overwrite)
-		    if self.Library.Appearance and self.Library.Appearance.Loading then return false, "Дождись загрузки фона перед сохранением профиля." end
+		    if self.Library.Appearance and self.Library.Appearance.Loading then return false, "Wait for the background to load before saving a profile." end
 		    local normalized, message = validName(name); if not normalized then return false, message end
 		    name = normalized
 		    if self.Data[name] and not overwrite then return false, "A profile with this name already exists." end
@@ -5236,7 +5236,7 @@ local moduleFactories = {
 		    return ok,ok and "Profile deleted." or message
 		end
 		function Profiles:Export(name)
-		    if not name and self.Library.Appearance and self.Library.Appearance.Loading then return nil, "Дождись загрузки фона перед экспортом профиля." end
+		    if not name and self.Library.Appearance and self.Library.Appearance.Loading then return nil, "Wait for the background to load before exporting a profile." end
 		    local data = name and self.Data[name] or self:Capture()
 		    if not data then return nil,"Choose an existing profile." end
 		    local ok,text=pcall(HttpService.JSONEncode,HttpService,data)
@@ -5337,8 +5337,8 @@ local moduleFactories = {
 		local Assets = require(script.Parent.Components.Assets)
 		local Appearance = {}
 		Appearance.__index = Appearance
-		local scaleLabels = { Crop = "Заполнить", Fit = "Вписать", Stretch = "Растянуть" }
-		local scaleValues = { ["Заполнить"] = "Crop", ["Вписать"] = "Fit", ["Растянуть"] = "Stretch" }
+		local scaleLabels = { Crop = "Fill", Fit = "Fit", Stretch = "Stretch" }
+		local scaleValues = { Fill = "Crop", Fit = "Fit", Stretch = "Stretch" }
 		local function finite(value) return type(value) == "number" and value == value and math.abs(value) < math.huge end
 		local function fraction(value, fallback) return finite(value) and math.clamp(value, 0, 1) or fallback end
 
@@ -5354,7 +5354,7 @@ local moduleFactories = {
 		        Library = library, Paint = library.Window.AcrylicPaint, Generation = 0,
 		        State = { Source = "", Transparency = fraction(config.BackgroundTransparency, 0.25),
 		            Darkness = fraction(config.BackgroundDarkness, 0.35), ScaleType = scaleLabels[config.BackgroundScaleType] and config.BackgroundScaleType or "Crop" },
-		        Status = "Фон не выбран. Вставь прямую ссылку на PNG/JPG или Roblox asset ID.",
+		        Status = "No background selected. Enter a direct PNG/JPG URL or a Roblox asset ID.",
 		    }, Appearance)
 		    self:_Render()
 		    Creator.AddSignal(library.Window.Root.Destroying, function() self:Destroy() end)
@@ -5373,7 +5373,7 @@ local moduleFactories = {
 		    if self.Destroyed then return end
 		    self.Status = message
 		    if self.StatusCard then self.StatusCard:SetDesc(message) end
-		    if failed then self.Library:Notify({Title = "Оформление", Content = message, Duration = 6}) end
+		    if failed then self.Library:Notify({Title = "Appearance", Content = message, Duration = 6}) end
 		end
 
 		function Appearance:_Dirty()
@@ -5445,13 +5445,13 @@ local moduleFactories = {
 		    self.Paint.BackgroundImage.Image = ""
 		    self:_Render()
 		    self:_Sync(true)
-		    self:_Status("Фон удалён. Можно выбрать другое изображение.")
+		    self:_Status("Background removed. You can choose another image.")
 		    if changed and not quiet then self:_Dirty() end
 		    return true
 		end
 
 		function Appearance:Apply(source, quiet)
-		    if self.Destroyed then return false, "Интерфейс закрыт." end
+		    if self.Destroyed then return false, "The interface is closed." end
 		    self:_Cancel()
 		    local normalized, message = Assets.NormalizeImageSource(source)
 		    if not normalized then self:_Status(message, true); return false, message end
@@ -5459,7 +5459,7 @@ local moduleFactories = {
 		    local generation = self.Generation
 		    self.Loading = true
 		    self.PendingSource = normalized
-		    self:_Status("Загружаем изображение… Текущий фон сохранится до завершения.")
+		    self:_Status("Loading image… The current background will stay until loading finishes.")
 		    if self.Controls then self.Controls.Source:SetValue(normalized) end
 		    local function current() return not self.Destroyed and self.Generation == generation end
 		    local function fail(reason)
@@ -5472,26 +5472,26 @@ local moduleFactories = {
 		        -- Assign only after URL/file validation, preserving the previous image on error.
 		        local assigned = pcall(function() self.Paint.BackgroundImage.Image = uri end)
 		        if not assigned then
-		            fail("Не удалось назначить изображение фону. Попробуй другой PNG/JPG или Roblox asset ID.")
+		            fail("Could not set the background image. Try another PNG/JPG or a Roblox asset ID.")
 		            return
 		        end
 		        self:_Cancel()
 		        local changed = self.State.Source ~= normalized
 		        self.State.Source = normalized
 		        self:_Render()
-		        self:_Status("Фон применён. Настройки оформления сохраняются в профилях.")
+		        self:_Status("Background applied. Appearance settings are included when saving profiles.")
 		        if changed and not quiet then self:_Dirty() end
 		    end
 		    self.Timeout = task.delay(20, function()
 		        self.Timeout = nil
 		        fail(normalized:match("^rbxassetid://")
-		            and "Roblox не успел загрузить изображение. Проверь asset ID и попробуй снова."
-		            or "Загрузка заняла слишком много времени. Проверь ссылку и попробуй снова.")
+		            and "Roblox image loading timed out. Check the asset ID and try again."
+		            or "Image loading took too long. Check the URL and try again.")
 		    end)
 		    task.spawn(function()
 		        local ok, uri, reason = pcall(Assets.ResolveImage, normalized)
 		        if not current() then return end
-		        if not ok or not uri then fail(ok and reason or "Не удалось загрузить изображение."); return end
+		        if not ok or not uri then fail(ok and reason or "Could not load the image."); return end
 		        -- URL images already passed PNG/JPG validation and the local-asset bridge.
 		        -- Native PreloadAsync/hidden IsLoaded are not authoritative for these URIs.
 		        -- Use the same direct Image assignment as the existing logo loader.
@@ -5512,17 +5512,17 @@ local moduleFactories = {
 		        if probe.IsLoaded or fetchStatus == Enum.AssetFetchStatus.Success then
 		            commit(uri)
 		        elseif not loaded then
-		            fail("Не удалось проверить Roblox asset ID. Попробуй прямую ссылку на PNG/JPG.")
+		            fail("Could not verify the Roblox asset ID. Try a direct PNG/JPG URL.")
 		        elseif fetchStatus == Enum.AssetFetchStatus.Failure then
-		            fail("Roblox не смог загрузить изображение по этому asset ID. Проверь его доступность.")
+		            fail("Roblox could not load this image. Check that the asset ID is accessible.")
 		        elseif fetchStatus == Enum.AssetFetchStatus.TimedOut then
-		            fail("Roblox не успел загрузить изображение. Проверь asset ID и попробуй снова.")
+		            fail("Roblox image loading timed out. Check the asset ID and try again.")
 		        else
 		            -- A false IsLoaded flag alone is inconclusive. Observe changes until timeout.
-		            self:_Status("Ожидаем загрузки изображения от Roblox…")
+		            self:_Status("Waiting for Roblox to load the image…")
 		        end
 		    end)
-		    return true, "Фон загружается."
+		    return true, "Background is loading."
 		end
 
 		function Appearance:Restore(state)
@@ -5537,32 +5537,32 @@ local moduleFactories = {
 		function Appearance:Attach(tab)
 		    if self.Destroyed or self.Attached then return end
 		    self.Attached = tab
-		    local section = tab:AddSection("Оформление")
+		    local section = tab:AddSection("Appearance")
 		    local source = section:AddInput("Bloomware_BackgroundURL", {
-		        Title = "Изображение фона", Description = "Прямая ссылка PNG/JPG или rbxassetid://ID",
+		        Title = "Background Image", Description = "Direct PNG/JPG URL or rbxassetid://ID",
 		        Default = self.PendingSource or self.State.Source, Placeholder = "https://…/background.png", Finished = true, MaxLength = 4096, IgnoreProfile = true,
 		    })
-		    section:AddButton({Title = "Применить фон", Description = "Загрузить изображение по указанной ссылке",
+		    section:AddButton({Title = "Apply Background", Description = "Load the image from the URL above",
 		        Callback = function() self:Apply(source.Value) end})
-		    section:AddButton({Title = "Удалить фон", Description = "Вернуть стандартный фон интерфейса",
+		    section:AddButton({Title = "Remove Background", Description = "Restore the default interface background",
 		        Callback = function() self:Clear() end})
 		    local transparency = section:AddSlider("Bloomware_BackgroundTransparency", {
-		        Title = "Прозрачность изображения", Description = "0 — яркий фон, 100 — невидимый",
+		        Title = "Image Transparency", Description = "0 = opaque, 100 = invisible",
 		        Default = self.State.Transparency * 100, Min = 0, Max = 100, Rounding = 0, IgnoreProfile = true,
 		        Callback = function(value) if not self.Syncing then self:SetTransparency(value / 100) end end,
 		    })
 		    local darkness = section:AddSlider("Bloomware_BackgroundDarkness", {
-		        Title = "Затемнение фона", Description = "Помогает сохранить читаемость текста",
+		        Title = "Background Dimming", Description = "Darken the image to keep text readable",
 		        Default = self.State.Darkness * 100, Min = 0, Max = 100, Rounding = 0, IgnoreProfile = true,
 		        Callback = function(value) if not self.Syncing then self:SetDarkness(value / 100) end end,
 		    })
 		    local scaleType = section:AddDropdown("Bloomware_BackgroundScaleType", {
-		        Title = "Масштабирование", Values = {"Заполнить", "Вписать", "Растянуть"},
+		        Title = "Image Scaling", Values = {"Fill", "Fit", "Stretch"},
 		        Default = scaleLabels[self.State.ScaleType], Multi = false, IgnoreProfile = true,
 		        Callback = function(value) if not self.Syncing then self:SetScaleType(scaleValues[value]) end end,
 		    })
 		    self.Controls = {Source = source, Transparency = transparency, Darkness = darkness, ScaleType = scaleType}
-		    self.StatusCard = section:AddParagraph({Title = "Фон интерфейса", Content = self.Status})
+		    self.StatusCard = section:AddParagraph({Title = "Interface Background", Content = self.Status})
 		end
 
 		-- Reuse Settings from the host script, or add it after the first user tab.
